@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>我的個人AI助理</title>
+        <link rel="stylesheet" href="style.css">
+    </head>
+    <body>
+        <div class="chat-container">
+            <div class="chat-box" id="chat-box">
+                <div class="message ai-message">AI 助理：您好！有什麼可以幫助您的嗎？</div>
+            </div>
+            <div class="input-area">
+                <input type="text" id="user-input" placeholder="輸入您的訊息...">
+                <button id="send-button">發送</button>
+            </div>
+            <div class="upload-area">
+                <div class="upload-row">
+                    <label for="document-upload">上傳文件：</label> <input type="file" id="document-upload">
+                    <button id="upload-button">上傳到知識庫</button>
+                </div>
+                <div class="upload-row">
+                     <div id="upload-status" class="upload-status"></div>
+                </div>
+                <div class="upload-row">
+                     <label for="audio-upload">上傳音頻：</label> <input type="file" id="audio-upload" accept="audio/*"> <button id="upload-audio-button">上傳並摘要保存</button>
+                </div>
+                <div class="upload-row">
+                     <span>語音錄製：</span> <button id="start-recording-button">開始錄音</button>
+                     <button id="stop-recording-button" disabled>停止錄音</button> </div>
+            </div>
+            <div class="newsletter-area">
+                <button id="show-newsletter-button">顯示最新AI新聞 Newsletter</button>
+                <div id="newsletter-content" class="newsletter-content" style="display: none;">
+                    <!-- Newsletter 內容將在這裡顯示 -->
+                    <p>載入中...</p>
+                </div>
+            </div>
+        </div>   
+        <script src="[https://cdn.jsdelivr.net/npm/marked/marked.min.js](https://cdn.jsdelivr.net/npm/marked/marked.min.js)"></script>
+        <script src="script.js"></script>
+    </body>
+</html>

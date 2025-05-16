@@ -1,0 +1,363 @@
+/* frontend/style.css (Modified for row-based upload-area) */
+
+body {
+    font-family: sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    background-color: #f0f0f0;
+    margin: 0;
+}
+
+.chat-container {
+    width: 90%;
+    max-width: 700px;
+    background-color: #fff;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 80vh; /* 讓聊天框佔據一定高度 */
+}
+
+.chat-box {
+    flex-grow: 1; /* 讓聊天框佔據剩餘空間 */
+    padding: 15px;
+    overflow-y: auto; /* 內容超出時顯示滾動條 */
+    border-bottom: 1px solid #eee;
+    display: flex; /* Use flexbox for message alignment */
+    flex-direction: column; /* Stack messages vertically */
+}
+
+/* 聊天訊息氣泡樣式 */
+.message {
+    margin-bottom: 10px;
+    padding: 10px 15px; /* 增加內邊距 */
+    border-radius: 20px; /* 更圓潤的氣泡邊角 */
+    max-width: 80%;
+    word-wrap: break-word; /* 長單詞或URL自動換行 */
+    position: relative;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1); /* 添加一點陰影 */
+    line-height: 1.4; /* 增加行高 */
+}
+
+.user-message {
+    background-color: #007bff; /* 使用藍色背景 */
+    color: white; /* 白色文字 */
+    align-self: flex-end; /* 靠右對齊 */
+    margin-left: auto;
+    border-bottom-right-radius: 5px; /* 右下角銳利一點 (可選) */
+}
+
+.ai-message {
+    background-color: #e9e9eb; /* 使用淺灰色背景 */
+    color: #333; /* 深色文字 */
+    align-self: flex-start; /* 靠左對齊 */
+    margin-right: auto;
+    border-bottom-left-radius: 5px; /* 左下角銳利一點 (可選) */
+}
+
+
+.input-area {
+    display: flex;
+    padding: 15px;
+    border-top: 1px solid #eee;
+}
+
+.input-area input[type="text"] {
+    flex-grow: 1; /* 輸入框佔據大部分空間 */
+    padding: 10px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    margin-right: 10px;
+    font-size: 1rem;
+}
+
+.input-area button {
+    padding: 10px 15px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1rem;
+}
+
+.input-area button:hover {
+    background-color: #0056b3;
+}
+
+
+/* 上傳和錄製區域的容器 */
+.upload-area {
+    padding: 15px;
+    border-top: 1px solid #eee;
+    display: flex;
+    flex-direction: column; /* <-- 讓 upload-area 內部的 row 垂直堆疊 */
+    gap: 10px; /* <-- upload-row 之間的垂直間距 */
+    /* align-items: center; <-- 在 column 方向不需要這個 */
+    /* flex-wrap: wrap; <-- 在 column 方向通常不需要這個 */
+}
+
+/* 定義每一行的 Flexbox 樣式 */
+.upload-row {
+    display: flex; /* <-- 讓 row 內部的元素水平排列 */
+    gap: 10px; /* <-- row 內部的水平間距 */
+    align-items: center; /* <-- row 內部的元素垂直居中對齊 */
+    width: 100%; /* <-- 讓每一行佔據 upload-area 的全部寬度 */
+    /* 確保 row 內的元素在空間不足時可以縮小或換行 (例如非常長的檔名) */
+    flex-wrap: wrap; /* <-- 確保單行內的元素可以換行 */
+}
+
+/* 標籤和文字的樣式 */
+.upload-row label,
+.upload-row span {
+     font-size: 0.9rem;
+     flex-shrink: 0; /* 標籤和文字通常不縮小 */
+     /* min-width: 60px;  可選：給標籤一個最小寬度，用於對齊 */
+}
+
+
+/* 調整文件選擇 input 的樣式，讓它在 Flex 佈局中能更好地縮放 */
+.upload-row input[type="file"] {
+    flex-grow: 1; /* 允許其填充可用空間 */
+    flex-shrink: 1; /* 允許其收縮 */
+    min-width: 100px; /* 設置一個最小寬度，避免過度收縮導致無法點擊或顯示檔名 */
+    padding: 5px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+    cursor: pointer;
+}
+
+/* 調整按鈕樣式，確保它們在 Flex 佈局中行為正常 */
+.upload-row button {
+    flex-shrink: 0; /* 按鈕通常不希望被壓縮 */
+    padding: 10px 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+/* 具體按鈕顏色和 hover 效果 */
+.upload-row button#upload-button { background-color: #28a745; color: white; }
+.upload-row button#upload-button:hover { background-color: #218838; }
+
+.upload-row button#upload-audio-button { background-color: #ffc107; color: #333; }
+.upload-row button#upload-audio-button:hover { background-color: #e0a800; }
+
+.upload-row button#start-recording-button { background-color: #007bff; color: white; }
+.upload-row button#start-recording-button:hover { background-color: #0056b3; }
+
+.upload-row button#stop-recording-button { background-color: #dc3545; color: white; }
+.upload-row button#stop-recording-button:hover { background-color: #c82333; }
+
+
+/* 禁用按鈕樣式 */
+.upload-row button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+/* 文件上傳狀態樣式 (位置調整到單獨的 row) */
+/* Note: The status div is inside a .upload-row in the new structure */
+#upload-status {
+    /* width: 100%; <-- 在 row 內，如果想佔滿一行，可以讓它 flex-grow: 1 且 flex-basis: 100% */
+    flex-basis: 100%; /* 讓它獨佔一行或在換行時佔滿 */
+    flex-grow: 1;
+    font-size: 0.8rem;
+    color: #555;
+    text-align: center;
+    flex-shrink: 0; /* 狀態文字通常不縮小 */
+    margin-top: 0; /* 在 row 內部可能不需要額外的 top margin */
+}
+
+#upload-status.success { color: #28a745; }
+#upload-status.error { color: #dc3545; }
+
+/* -------------------- 響應式設計 (Mobile Responsive) -------------------- */
+
+/* 定義一個媒體查詢，針對最大寬度為 600px 的螢幕 (通常涵蓋手機) */
+/* 在這個區塊內的樣式只會應用於螢幕寬度小於或等於 600px 的設備 */
+@media (max-width: 600px) {
+    body {
+        /* 在小屏幕上可以讓 body 的佈局稍微調整，例如移除 center 對齊 */
+        /* justify-content: flex-start; */
+        /* align-items: flex-start; */
+        min-height: auto; /* 在小屏上高度可能不需要佔滿整個視窗 */
+        padding: 10px; /* 添加一些全局內邊距 */
+    }
+
+    .chat-container {
+        width: 100%; /* 在小屏幕上讓容器佔滿寬度 */
+        height: 90vh; /* 在小屏上可以佔用更多視窗高度 */
+        max-width: none; /* 移除最大寬度限制，讓它自由伸縮 */
+        box-shadow: none; /* 在小屏上可以移除陰影，減少視覺干擾 */
+        border-radius: 0; /* 在小屏上可以移除圓角，佔據更多空間 */
+    }
+
+    .chat-box {
+        padding: 10px; /* 減少內邊距，節省空間 */
+    }
+
+    .message {
+        max-width: 90%; /* 在小屏上讓訊息氣泡佔據更多寬度 */
+        padding: 8px 12px; /* 減少內邊距 */
+        margin-bottom: 8px; /* 減少間距 */
+    }
+
+    .input-area {
+        flex-direction: column; /* 在小屏幕上讓輸入框和發送按鈕垂直堆疊 */
+        gap: 10px; /* 垂直間距 */
+        padding: 10px;
+    }
+
+    .input-area input[type="text"] {
+        margin-right: 0; /* 移除右側間距 */
+        width: 100%; /* 佔滿寬度 */
+        box-sizing: border-box; /* 確保 padding 不增加總寬度 */
+    }
+
+    .input-area button {
+        width: 100%; /* 佔滿寬度 */
+        padding: 10px;
+        box-sizing: border-box;
+    }
+
+    .upload-area {
+        /* upload-area 內部本身已經是 column，這裡可能不需要改 direction */
+        padding: 10px;
+        gap: 10px; /* 行之間的垂直間距 */
+    }
+
+    .upload-row {
+        flex-direction: column; /* <--- 在小屏幕上，讓每一行內的元素也垂直堆疊 */
+        gap: 5px; /* 行內元素的垂直間距 */
+        align-items: flex-start; /* 靠左對齊 */
+        flex-wrap: nowrap; /* <--- 移除自動換行，因為現在是垂直堆疊 */
+    }
+
+    .upload-row label,
+    .upload-row span {
+         /* 在小屏上，如果元素垂直堆疊，標籤可能需要佔據一行 */
+         width: 100%; /* 讓標籤佔據整行 */
+         margin-bottom: 2px; /* 添加底部間距 */
+         font-size: 0.9rem;
+         flex-shrink: 0;
+    }
+
+    .upload-row input[type="file"] {
+         width: 100%; /* 佔滿寬度 */
+         min-width: auto; /* 移除最小寬度限制 */
+         box-sizing: border-box; /* 確保 padding 和 border 不增加總寬度 */
+         font-size: 0.9rem; /* 稍微小一點 */
+    }
+
+    .upload-row button {
+        width: 100%; /* 佔滿寬度 */
+        padding: 8px; /* 減少內邊距 */
+        font-size: 0.9rem;
+        box-sizing: border-box;
+        flex-shrink: 0;
+    }
+
+    /* 具體按鈕顏色和 hover 效果在媒體查詢外部定義即可，會被繼承 */
+    /* .upload-row button#upload-button { ... } */
+    /* .upload-row button#upload-audio-button { ... } */
+    /* .upload-row button#start-recording-button { ... } */
+    /* .upload-row button#stop-recording-button { ... } */
+    /* 禁用按鈕樣式也保持在外部 */
+    /* .upload-row button:disabled { ... } */
+
+
+    /* 文件上傳狀態樣式 (位置調整到單獨的 row) */
+    #upload-status {
+        flex-basis: 100%; /* 讓它在行內獨佔空間 */
+        flex-grow: 1;
+        font-size: 0.8rem;
+        /* text-align: center; */ /* 在垂直堆疊時，靠左對齊可能更好 */
+        text-align: left;
+        margin-top: 0; /* 在 row 內部可能不需要額外的 top margin */
+        flex-shrink: 0;
+    }
+
+    /* .upload-status.success { ... } */
+    /* .upload-status.error { ... } */
+
+}
+
+.newsletter-area {
+    padding: 15px;
+    border-top: 1px solid #eee;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.newsletter-area button {
+     /* 可以共用 upload-area button 的樣式 */
+     padding: 10px 15px;
+     background-color: #17a2b8; /* 青色按鈕 */
+     color: white;
+     border: none;
+     border-radius: 5px;
+     cursor: pointer;
+     font-size: 0.9rem;
+     align-self: flex-start; /* 靠左對齊 */
+}
+
+.newsletter-area button:hover {
+    background-color: #138496;
+}
+
+.newsletter-content .newsletter-source-links {
+    border: 1px solid #ccc;
+    padding: 15px;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+    max-height: 300px; /* 限制高度並添加滾動條 */
+    overflow-y: auto;
+    /* style="display: none;" initially hides this */
+}
+
+
+.newsletter-content .newsletter-source-links strong {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 0.9rem;
+}
+
+.newsletter-content .newsletter-source-links ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.newsletter-content .newsletter-source-links li {
+    margin-bottom: 5px;
+    /* 添加一個小圖標作為列表標記 (可選) */
+    padding-left: 15px; 
+    position: relative;
+}
+
+/* 可選：為列表項添加內容前的生成內容 (例如一個小圓點或箭頭) */
+.newsletter-content .newsletter-source-links li::before {
+    content: "•";
+    position: absolute;
+    left: 0;
+    color: #007bff;
+    font-weight: bold;
+}
+
+
+.newsletter-content .newsletter-source-links a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+.newsletter-content .newsletter-source-links a:hover {
+    text-decoration: underline;
+}
