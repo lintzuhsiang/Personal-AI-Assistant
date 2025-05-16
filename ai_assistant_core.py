@@ -506,6 +506,123 @@ def transcribe_audio(audio_file_path: str, openai_client: Optional[openai.OpenAI
         logging.error(f"執行語音轉文字時發生意外錯誤: {e}", exc_info=True)
         return None # 返回 None 表示失敗
 
+
+# --- 新增：建立生成 AI 新聞 Newsletter 的函式 ---
+def generate_ai_newsletter(interests: list[str], model: Optional[genai.GenerativeModel], search_api_key: Optional[str], search_engine_id: Optional[str]) -> tuple[Optional[str], list]:
+    """
+    根據使用者興趣，獲取近期 AI 新聞，並使用 AI 總結成 Newsletter 格式。
+
+    Args:
+        interests (list[str]): 使用者感興趣的 AI 主題關鍵詞列表。
+        model (Optional[genai.GenerativeModel]): 已初始化好的 Gemini 模型實例，用於總結。
+        search_api_key (Optional[str]): Google Search API 金鑰。
+        search_engine_id (Optional[str]): Google Search Engine ID。
+
+    Returns:
+        Optional[str]: AI 生成的 Newsletter 文字，如果失敗或無內容則返回 None。
+                       如果缺少必要金鑰或無新聞，返回描述性字符串。
+    """
+    # 使用連結作為唯一標識進行去重
+    unique_search_results = []
+    # 檢查必要條件
+    if model is None:
+        logging.error("AI 模型未初始化，無法生成 Newsletter 摘要。")
+        return ("錯誤：AI 模型未準備好，無法生成 Newsletter。",unique_search_results) # 返回錯誤字符串給可能的調用者
+    if not search_api_key or not search_engine_id:
+        logging.warning("缺少搜尋 API 金鑰或 CX ID，無法獲取 AI 新聞。")
+        return ("警告：缺少搜尋 API 金鑰或 CX ID，無法獲取 AI 新聞。",unique_search_results) # 返回警告字符串
+
+    logging.info("開始生成 AI 新聞 Newsletter...")
+    all_search_results = []
+
+    # 獲取每個興趣的近期新聞
+    for interest in interests:
+        # 構造搜尋查詢：例如 "最新LLM進展 上週新聞" 或 "AI在醫療應用 recent news"
+        # 結合時間詞 ("上週", "近期", "最新", "過去七天") 有助於獲取時效性內容
+        # 實際查詢詞可以根據經驗或測試調整
+        query = f"{interest} AI news last week" # <-- 設置搜尋查詢格式 (使用英文可能搜尋結果更廣)
+        logging.info(f"搜尋 '{interest}' 相關新聞：'{query}'")
+
+        # 使用之前的 perform_web_search 函式獲取搜尋結果
+        # 可以考慮獲取更多結果，例如 num_results=5 或 10，並在後續處理時篩選
+        results = perform_web_search(query, search_api_key, search_engine_id, num_results=5) # 為每個興趣獲取前 5 個結果
+
+        if results:
+            logging.info(f"找到 {len(results)} 個關於 '{interest}' 的新聞結果。")
+            all_search_results.extend(results) # 將結果添加到總列表
+        else:
+            logging.info(f"未能找到關於 '{interest}' 的新聞結果。")
+
+    # 移除重複的搜尋結果 (可能不同興趣搜到同一篇)
+    seen_links = set()
+    for result in all_search_results:
+        link = result.get('link')
+        # 確保 link 存在且是字串，避免因錯誤數據導致崩潰
+        if link and isinstance(link, str) and link not in seen_links:
+            unique_search_results.append(result)
+            seen_links.add(link)
+    logging.info(f"總共找到 {len(unique_search_results)} 個不重複的新聞結果。")
+
+
+    if not unique_search_results:
+        logging.info("未找到任何相關的近期 AI 新聞。")
+        return "未找到任何相關的近期 AI 新聞。" # 返回提示信息
+
+
+    # --- 使用 AI 模型總結並格式化 Newsletter ---
+    logging.info("使用 AI 模型總結並格式化 Newsletter...")
+
+    # 構造 Prompt，指示 AI 扮演新聞編輯並總結
+    # 這個 Prompt 需要清晰指示 AI 的任務和期望的輸出格式
+    # 提取搜尋結果的標題、URL 和摘要作為 AI 的上下文
+    context_text = "\n---\n".join([
+         f"Title: {item.get('title', 'N/A')}\nURL: {item.get('link', 'N/A')}\nSnippet: {item.get('snippet', 'N/A')}"
+         for item in unique_search_results
+    ])
+
+    newsletter_prompt = textwrap.dedent(f"""
+    你是一個 AI 新聞編輯助理，負責根據提供的搜尋結果，為使用者編寫一份關於**過去一週 AI 領域主要進展**的個性化 Newsletter。
+    使用者的興趣主題包括：{", ".join(interests)}。
+
+    請閱讀以下搜尋結果，識別最重要的、與使用者興趣相關的、發生在過去一週的 AI 新聞和發展。
+    從中提煉核心要點，並以簡潔、有條理的方式進行總結和呈現，像一份 Newsletter。
+
+    Newsletter 應包含：
+    - 一個吸引人的標題 (例如：『本週 AI 新聞摘要』)。
+    - 根據主題或重要性進行分組的總結，使用條列或簡短段落。
+    - 每條新聞提及關鍵要點。
+    - （可選）在總結末尾提及總結來源是基於提供的資訊。
+    - 使用流暢的中文。
+    - 請確保內容是基於搜尋結果中的**近期**資訊。
+
+    搜尋結果：
+    ---
+    {context_text}
+    ---
+
+    Newsletter 內容：
+    """)
+
+    # print(f"DEBUG: Newsletter Prompt:\n{newsletter_prompt}") # 調試用
+
+    try:
+        # 呼叫 Gemini 模型生成 Newsletter 內容
+        response = model.generate_content(newsletter_prompt)
+        newsletter_content = response.text.strip() if response.text else None
+
+        if newsletter_content:
+            logging.info("成功生成 Newsletter 內容。")
+            return (newsletter_content,unique_search_results)
+        else:
+            logging.warning("AI 模型未能生成 Newsletter 內容。")
+            return ("抱歉，AI 未能成功生成 Newsletter 內容。",unique_search_results) # 返回提示信息
+
+    except Exception as e:
+        logging.error(f"使用 AI 模型生成 Newsletter 時發生錯誤: {e}", exc_info=True)
+        return (f"抱歉，生成 Newsletter 時發生內部錯誤：{e}",unique_search_results) # 返回錯誤信息
+
+
+
 # --- 將核心 RAG 回答邏輯封裝成函式 ---
 def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[Chroma], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
     """
@@ -824,6 +941,34 @@ if __name__ == "__main__":
 
     # 向量資料庫可能為 None，如果初始化失敗或沒有文件
     print("--- 應用程式啟動初始化完成 ---")
+    print("-" * 40)
+
+    # --- 新增：AI 新聞 Newsletter 生成測試區塊 ---
+    # 這個區塊用於在開發階段單獨測試 generate_ai_newsletter 函式
+    print("\n--- 運行 AI 新聞 Newsletter 生成測試 ---")
+
+    # 只有當 AI 模型和搜尋金鑰都可用時才運行測試
+    # model, SEARCH_API_KEY, SEARCH_ENGINE_ID 都是在 __main__ 開頭初始化/載入的全局變數
+    if model is None:
+        logging.warning("跳過 Newsletter 生成測試：AI 模型未初始化。")
+        print("跳過 Newsletter 生成測試，因為 AI 模型未準備好。")
+
+    elif not config.get('SEARCH_API_KEY') or not config.get('SEARCH_ENGINE_ID'):
+        logging.warning("跳過 Newsletter 生成測試：缺少搜尋 API 金鑰或 CX ID。")
+        print("跳過 Newsletter 生成測試，因為缺少搜尋 API 金鑰或 CX ID。")
+    else:
+        print(f"開始生成上週關於 {', '.join(USER_AI_INTERESTS)} 的 Newsletter...")
+        # 呼叫新的 Newsletter 生成函式，使用全局變數
+        newsletter_content = generate_ai_newsletter(USER_AI_INTERESTS, model, config.get('SEARCH_API_KEY'), config.get('SEARCH_ENGINE_ID'))
+
+        if newsletter_content:
+            print("\n--- 生成的 AI 新聞 Newsletter ---")
+            print(newsletter_content) # 印出生成的 Newsletter 內容
+            print("---------------------------------")
+        else:
+            print("\n未能生成 AI 新聞 Newsletter。請查看上面的日誌了解原因。")
+
+    logging.info("--- AI 新聞 Newsletter 生成測試結束 ---")
     print("-" * 40)
 
     # --- 新增：語音轉文字 (STT) 功能測試區塊 ---
