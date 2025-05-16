@@ -32,12 +32,11 @@ logging.basicConfig(level=logging.INFO,
 # SEARCH_API_KEY: Optional[str] = None # 在載入函式中賦值
 # SEARCH_ENGINE_ID: Optional[str] = None # 在載入函式中賦值
 
-
 # --- 定義向量資料庫的儲存路徑 ---
 PERSIST_DIRECTORY = "vector_db"
 DEFAULT_GEMINI_MODEL_NAME = 'gemini-1.5-flash-latest'
 DEFAULT_EMBEDDING_MODEL_NAME = 'models/text-embedding-004'
-
+DEFAULT_WHISPER_MODEL_NAME = 'whisper-1'
 
 # --- 將環境變數載入封裝成函式 ---
 def load_env_variables() -> dict: # 返回一個字典
@@ -457,7 +456,55 @@ def process_and_add_to_vector_store(file_path: str, vectorstore: Chroma, embeddi
     except Exception as e:
         logging.error(f"處理文件 '{file_path}' 並添加到向量資料庫時發生錯誤: {e}", exc_info=True)
         return False # 處理失敗
-    
+
+
+# --- 新增：建立語音轉文字 (STT) 函式 ---
+def transcribe_audio(audio_file_path: str, openai_client: Optional[openai.OpenAI]) -> Optional[str]: # 接收 client 實例
+    """
+    使用 OpenAI Whisper 模型將音頻檔案轉錄為文字。
+
+    Args:
+        audio_file_path (str): 音頻檔案的完整路徑。
+        openai_api_key (Optional[str]): OpenAI API 金鑰。
+
+    Returns:
+        Optional[str]: 轉錄的文字，如果失敗或無效則返回 None。
+    """
+    if not openai_client:
+        logging.error("OpenAI API 金鑰未提供，無法執行語音轉文字。")
+        return None
+    if not os.path.exists(audio_file_path):
+        logging.error(f"音頻檔案不存在：{audio_file_path}")
+        return None
+
+    logging.info(f"開始將音頻檔案 '{os.path.basename(audio_file_path)}' 轉錄為文字...")
+
+    try:
+        # 打開音頻檔案以二進制讀取模式 ('rb')
+        with open(audio_file_path, "rb") as audio_file:
+            # 呼叫 OpenAI 音頻轉錄 API
+            transcription = openai_client.audio.transcriptions.create(
+              model=DEFAULT_WHISPER_MODEL_NAME, # 使用 Whisper 模型
+              file=audio_file,
+              # response_format="text" # 可選：指定返回純文本
+              language="zh" # 可選：指定語言，有助於提高轉錄中文的準確性
+            )
+
+        # 轉錄結果通常在 transcription.text 中
+        transcribed_text = transcription.text
+        logging.info(f"語音轉文字成功。轉錄文本 (前 100 字元): {transcribed_text[:100]}...")
+        return transcribed_text
+
+    except openai.APIError as e:
+        logging.error(f"OpenAI API 錯誤 (STT): {e}", exc_info=True)
+        # 在核心模組避免直接 print 給終端機使用者或 API 調用者
+        return None # 返回 None 表示失敗
+    except FileNotFoundError:
+        logging.error(f"音頻檔案未找到或無法打開：{audio_file_path}")
+        return None
+    except Exception as e:
+        logging.error(f"執行語音轉文字時發生意外錯誤: {e}", exc_info=True)
+        return None # 返回 None 表示失敗
 
 # --- 將核心 RAG 回答邏輯封裝成函式 ---
 def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[Chroma], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
@@ -777,6 +824,42 @@ if __name__ == "__main__":
 
     # 向量資料庫可能為 None，如果初始化失敗或沒有文件
     print("--- 應用程式啟動初始化完成 ---")
+    print("-" * 40)
+
+    # --- 新增：語音轉文字 (STT) 功能測試區塊 ---
+    print("\n--- 運行語音轉文字測試 ---")
+    # 請準備一個小型音頻檔案 (.mp3, .wav 等)，放在與 ai_assistant_core.py 同一個目錄下
+    # 並修改這裡的路徑指向您的測試檔案
+    test_audio_file = "test_audio_2.mp3" # <--- 修改為您的測試音頻檔案名稱和副檔名，例如 "my_voice_record.wav"
+
+    # 只有當 OpenAI API 金鑰已設定且測試檔案存在時才運行測試
+    # OPENAI_API_KEY 已經在 load_env_variables 中載入
+    openai_client = None # 初始化為 None
+    if config.get('OPENAI_API_KEY'):
+        try:
+            openai_client = openai.OpenAI(api_key=config.get('OPENAI_API_KEY')) # 初始化一次
+            logging.info("OpenAI 客戶端初始化成功。")
+        except Exception as e:
+            logging.error(f"初始化 OpenAI 客戶端失敗: {e}")
+    else:
+        logging.warning("跳過語音轉文字測試：缺少 OPENAI_API_KEY。")
+
+    if openai_client:
+        if not os.path.exists(test_audio_file):
+            logging.warning(f"跳過語音轉文字測試：測試音頻檔案不存在：{test_audio_file}")
+            print(f"跳過語音轉文字測試，因為測試音頻檔案 '{test_audio_file}' 不存在。")
+            print("請準備一個音頻檔案並修改 test_audio_file 變數指向它。")
+        else:
+            transcribed_text = transcribe_audio(test_audio_file, openai_client) # 傳遞 client 實例
+            if transcribed_text:
+                print(f"\n語音轉文字測試成功。轉錄結果：")
+                print(transcribed_text)
+            else:
+                print("\n語音轉文字測試失敗。請查看上面的日誌獲取詳細錯誤。")
+    else:
+        logging.warning("跳過語音轉文字測試：OpenAI 客戶端未初始化 (可能缺少 API 金鑰或初始化失敗)。")
+    
+    logging.info("--- 語音轉文字測試結束 ---")
     print("-" * 40)
 
     # --- 主要對話迴圈 (CLI 模式) ---
