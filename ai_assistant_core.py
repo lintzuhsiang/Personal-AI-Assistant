@@ -247,16 +247,227 @@ def decide_intent_and_query(user_input: str, model_instance: Optional[genai.Gene
         logging.error(f"與 AI 模型互動進行意圖判斷時發生意外錯誤: {e}。返回預設值。", exc_info=True)
         return default_response
 
+def load_and_chunk_document(file_path: str) -> list[Document]:
+    """
+    載入指定路徑的文件，並將其分割成較小的文字片段 (chunks)。
 
+    Args:
+        file_path (str): 文件的完整路徑。
+
+    Returns:
+        list[Document]: 分割後的文字片段列表，每個片段是一個 Document 對象。
+                        如果文件類型不受支持或載入失敗，返回空列表。
+    """
+    if not os.path.exists(file_path):
+        logging.error(f"文件不存在：{file_path}")
+        return []
+
+    # 根據文件副檔名選擇合適的載入器
+    _, file_extension = os.path.splitext(file_path)
+    loader = None
+    if file_extension.lower() == '.txt':
+        loader = TextLoader(file_path, encoding='utf-8')
+        logging.info(f"使用 TextLoader 載入文件：{file_path}")
+    elif file_extension.lower() == '.pdf':
+        loader = PyPDFLoader(file_path)
+        logging.info(f"使用 PyPDFLoader 載入文件：{file_path}")
+    # 您可以添加更多文件類型的支持
+    else:
+        logging.warning(f"不支援的文件類型：{file_extension} (文件路徑: {file_path})")
+        return []
+
+    # 載入文件內容
+    try:
+        documents = loader.load()
+        logging.info(f"成功載入文件：{file_path}，共 {len(documents)} 頁/部分。")
+    except Exception as e:
+        logging.error(f"載入文件 {file_path} 時發生錯誤: {e}", exc_info=True)
+        return []
+
+    # 初始化文字分割器
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,  # 每個片段的最大字元數
+        chunk_overlap=200, # 相鄰片段之間重疊的字元數
+        length_function=len,
+        add_start_index=True
+    )
+
+    # 分割文件內容
+    logging.info(f"開始分割文件內容...")
+    try:
+        chunks = text_splitter.split_documents(documents)
+        logging.info(f"文件分割完成，共生成 {len(chunks)} 個片段 (chunks)。")
+    except Exception as e:
+        logging.error(f"分割文件 {file_path} 時發生錯誤: {e}", exc_info=True)
+        return []
+
+    return chunks
+
+
+# --- 將向量資料庫初始化/載入封裝成函式 (處理持久化) ---
+def initialize_vector_store(persist_directory: str, document_paths: list[str], google_api_key: str, embedding_model_name: str = DEFAULT_EMBEDDING_MODEL_NAME) -> Optional[Chroma]:
+    """
+    初始化或載入向量資料庫。如果持久化目錄存在則載入，否則處理文件並創建。
+
+    Args:
+        persist_directory (str): 向量資料庫儲存的目錄。
+        document_paths (list[str]): 需要處理的文件路徑列表。
+        google_api_key (str): Google API 金鑰，用於嵌入模型。
+        embedding_model_name (str): 用於生成嵌入的模型名稱。
+
+    Returns:
+        Optional[Chroma]: 初始化或載入成功的 Chroma 向量資料庫實例，失敗則返回 None。
+    """
+    logging.info(f"嘗試初始化向量資料庫。持久化目錄: {persist_directory}")
+
+    # 確保有 API 金鑰來創建嵌入對象
+    if not google_api_key:
+         logging.error("缺少 Google API 金鑰，無法創建嵌入模型或向量資料庫。")
+         return None
+
+    try:
+         # 準備 LangChain 嵌入模型對象
+         logging.info(f"準備使用嵌入模型 '{embedding_model_name}' 創建 LangChain Embedding 對象...")
+         langchain_gemini_embeddings = GoogleGenerativeAIEmbeddings(
+             model=embedding_model_name,
+             google_api_key=google_api_key # 傳遞 API 金鑰
+         )
+         logging.info("成功創建 LangChain 的 GoogleGenerativeAIEmbeddings 對象。")
+
+         # --- 判斷是創建新的資料庫還是載入現有的 ---
+         if os.path.exists(persist_directory):
+             # 如果儲存目錄已存在，則載入現有的向量資料庫
+             logging.info(f"載入現有的 Chroma 向量資料庫從目錄: {persist_directory}")
+             # 載入時也需要提供相同的嵌入對象，確保兼容性
+             vectorstore = Chroma(persist_directory=persist_directory, embedding_function=langchain_gemini_embeddings)
+             logging.info("成功載入現有的 Chroma 向量資料庫。")
+             return vectorstore
+
+         else:
+             # 如果儲存目錄不存在，則需要處理文件並創建新的資料庫
+             logging.warning(f"儲存目錄 '{persist_directory}' 不存在。開始處理文件並創建新的資料庫。")
+
+             all_chunks = []
+             for doc_path in document_paths:
+                 if os.path.exists(doc_path):
+                     logging.info(f"處理文件: {doc_path}")
+                     chunks = load_and_chunk_document(doc_path) # 使用之前的 load_and_chunk_document 函式
+                     all_chunks.extend(chunks)
+                     logging.info(f"文件 {doc_path} 處理完成，生成 {len(chunks)} 個片段。總片段數: {len(all_chunks)}")
+                 else:
+                     logging.warning(f"文件不存在，跳過處理：{doc_path}")
+
+
+             if all_chunks:
+                 # 建立並填充向量資料庫並儲存到磁碟
+                 logging.info(f"開始創建並填充 Chroma 向量資料庫到目錄: {persist_directory}，共 {len(all_chunks)} 個片段...")
+                 vectorstore = Chroma.from_documents(
+                     documents=all_chunks, # 所有文件片段列表
+                     embedding=langchain_gemini_embeddings, # 嵌入對象
+                     persist_directory=persist_directory # 指定儲存目錄
+                 )
+                 logging.info(f"成功創建並填充 Chroma 向量資料庫到目錄: {persist_directory}。")
+
+                 # 持久化儲存 (確保資料寫入磁碟)
+                 vectorstore.persist()
+                 logging.info("向量資料庫已持久化儲存。")
+                 return vectorstore
+
+             else:
+                 logging.warning("沒有找到有效的文檔可供處理，未能創建向量資料庫。")
+                 logging.warning("\n沒有找到有效的文檔，未能創建向量資料庫。請確認文件路徑是否正確。")
+                 return None # 沒有片段，無法創建資料庫
+
+
+    except ImportError:
+         logging.error("需要安裝 'langchain-google-genai' 和 'chromadb' 函式庫才能初始化向量資料庫。")
+         logging.error("請運行指令：python -m pip install langchain-google-genai chromadb")
+         return None
+    except Exception as e:
+        logging.error(f"初始化向量資料庫時發生錯誤: {e}", exc_info=True)
+        return None # 初始化失敗返回 None
+
+
+# --- 建立處理單一文件並加入現有向量資料庫的函式 ---
+def process_and_add_to_vector_store(file_path: str, vectorstore: Chroma, embedding_model_name: str, google_api_key: str) -> bool:
+    """
+    載入、分割指定文件，並將其內容添加到現有的向量資料庫中。
+
+    Args:
+        file_path (str): 需要處理的文件的完整路徑。
+        vectorstore (Chroma): 已初始化好的 Chroma 向量資料庫實例。
+        embedding_model_name (str): 用於生成嵌入的模型名稱。
+        google_api_key (str): Google API 金鑰，用於嵌入模型。
+
+    Returns:
+        bool: 如果成功處理並添加到資料庫，返回 True，否則返回 False。
+    """
+    # 函數內部首先進行基本檢查
+    if vectorstore is None:
+        logging.error("向量資料庫未初始化，無法添加文件。")
+        return False
+    if not os.path.exists(file_path):
+        logging.error(f"文件不存在：{file_path}，無法添加。")
+        return False
+    if not google_api_key:
+         logging.error("缺少 Google API 金鑰，無法創建嵌入模型或添加到向量資料庫。")
+         return False
+
+    logging.info(f"開始處理文件 '{file_path}' 並添加到向量資料庫...")
+
+    try:
+        # 1. 載入並分割文件 (使用之前定義的函式)
+        # 這個函式內部已經處理了支援的文件類型，不支援的會返回空列表
+        document_chunks = load_and_chunk_document(file_path)
+
+        if not document_chunks:
+            logging.warning(f"文件 '{file_path}' 未能生成任何文件片段，跳過添加。請確認文件內容及類型是否正確。")
+            return False # 沒有片段，視為失敗
+
+        # 2. 準備嵌入模型對象 (與初始化向量庫時使用相同的模型和金鑰)
+        logging.info(f"準備使用嵌入模型 '{embedding_model_name}' 創建 LangChain Embedding 對象用於添加新文檔...")
+        langchain_gemini_embeddings = GoogleGenerativeAIEmbeddings(
+            model=embedding_model_name,
+            google_api_key=google_api_key
+        )
+        logging.info("成功創建 LangChain 的 GoogleGenerativeAIEmbeddings 對象用於添加。")
+
+        # 3. 將文件片段添加到現有的向量資料庫
+        # vectorstore.add_documents 方法可以將新的 Document 對象列表添加到現有資料庫
+        # 它會自動為新文檔生成嵌入，並儲存到 Chroma 中
+        logging.info(f"開始添加 {len(document_chunks)} 個文件片段到向量資料庫...")
+        vectorstore.add_documents(
+            documents=document_chunks,
+            embedding=langchain_gemini_embeddings # 提供嵌入對象，它會自動為新文檔生成嵌入
+        )
+        logging.info(f"成功添加文件片段到向量資料庫。")
+
+        # 4. 持久化儲存變更 (非常重要！)
+        # 如果資料庫是持久化的，添加文檔後需要呼叫 persist() 方法來保存變更
+        # 檢查 vectorstore 是否有 persist 方法 (內存資料庫可能沒有)
+        if hasattr(vectorstore, 'persist') and callable(vectorstore.persist):
+            vectorstore.persist()
+            logging.info("向量資料庫已持久化變更到磁碟。")
+        else:
+            logging.info("向量資料庫不支援持久化或未配置持久化路徑，變更僅在運行期間有效。")
+
+
+        return True # 成功處理並添加
+
+    except Exception as e:
+        logging.error(f"處理文件 '{file_path}' 並添加到向量資料庫時發生錯誤: {e}", exc_info=True)
+        return False # 處理失敗
+    
 
 # --- 將核心 RAG 回答邏輯封裝成函式 ---
-def get_ai_response(user_input: str, model: genai.GenerativeModel, search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
+def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[Chroma], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
     """
     根據使用者輸入，結合個人知識庫和網路搜尋，生成 AI 的回答。
 
     Args:
         user_input (str): 使用者的問題或指令。
         model: 已初始化好的 Gemini 模型實例。
+        vectorstore (Optional[Chroma]): 已初始化好的個人知識庫向量資料庫實例，可能為 None。
         search_api_key (Optional[str]): Google Search API 金鑰，可能為 None。
         search_engine_id (Optional[str]): Google Search Engine ID，可能為 None。
 
@@ -274,6 +485,44 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, search_api_ke
     relevant_term = intent_data.get('term', user_input) # 獲取判斷的關鍵詞，默認為原始輸入
     search_needed = intent_data.get('web_search_needed', False) # 從 AI 判斷結果獲取
     web_search_query = intent_data.get('web_search_query', relevant_term or user_input) # 從 AI 判斷結果獲取
+
+    # --- 個人知識庫檢索 ---
+    personal_context = None
+    retrieved_personal_docs = []
+
+    # 只有當 vectorstore 成功創建或載入時才執行檢索
+    if vectorstore is not None:
+        # 根據判斷的意圖和關鍵詞調整檢索查詢詞
+        # 如果是 explain 或 discuss，優先使用 AI 提取的關鍵詞作為檢索詞
+        # 如果是 chat，使用原始使用者輸入作為檢索詞
+        # 如果 AI 判斷的關鍵詞是空字串，回退到使用原始輸入
+        retrieval_query = relevant_term if relevant_term and primary_intent in ['explain', 'discuss'] else user_input
+        # 確保檢索查詢詞不是空的
+        if not retrieval_query.strip():
+             retrieval_query = user_input # 避免空查詢
+
+        logging.info(f"從個人知識庫檢索與查詢 '{retrieval_query}' (意圖: {primary_intent}) 相關的片段...")
+        try:
+            # 在向量資料庫中進行相似度搜尋以檢索相關的個人知識片段
+            # 檢索更多相關片段，以獲取更全面的概念信息
+            retrieved_personal_docs = vectorstore.similarity_search(retrieval_query, k=5) # 檢索最相似的 5 個片段
+            if retrieved_personal_docs:
+                logging.info(f"從個人知識庫檢索到 {len(retrieved_personal_docs)} 個相關片段。")
+                personal_context_parts = [doc.page_content for doc in retrieved_personal_docs]
+                personal_context = "\n---\n".join(personal_context_parts) # 使用分隔符連接
+                logging.info("已將個人知識片段格式化為上下文。")
+            else:
+                logging.info("從個人知識庫未能檢索到相關片段。")
+
+        except Exception as e:
+             logging.error(f"執行個人知識庫檢索時發生錯誤: {e}", exc_info=True)
+             #print("AI 助理：執行個人知識庫檢索時發生錯誤。") # 在 API 模式下避免直接 print 給使用者
+             personal_context = None # 確保在發生錯誤時上下文為 None
+
+
+    else:
+        logging.warning("向量資料庫未初始化，跳過個人知識庫檢索。")
+
 
     # --- 使用 AI 判斷是否需要網路搜尋及獲取查詢詞 ---
     
@@ -354,6 +603,41 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, search_api_ke
         以下是參考資訊：
         """).strip())
         logging.info("構造標準聊天 Prompt。")
+
+
+    # 2. 加入個人知識庫上下文 (如果檢索到了或狀態提示) (這部分代碼保持原樣)
+    if personal_context:
+        final_prompt_parts.append(textwrap.dedent(f"""
+        --- 個人知識庫參考 ---
+        {personal_context}
+        """).strip())
+    elif vectorstore is not None and not retrieved_personal_docs:
+        final_prompt_parts.append(textwrap.dedent("""
+        --- 個人知識庫參考 ---
+        (未從個人知識庫檢索到與問題相關的筆記)
+        """).strip())
+    elif vectorstore is None:
+         final_prompt_parts.append(textwrap.dedent("""
+        --- 個人知識庫參考 ---
+        (個人知識庫功能未啟用或未成功載入)
+        """).strip())
+
+    # 2. 加入個人知識庫上下文 (如果檢索到了或狀態提示) (這部分代碼保持原樣)
+    if personal_context:
+        final_prompt_parts.append(textwrap.dedent(f"""
+        --- 個人知識庫參考 ---
+        {personal_context}
+        """).strip())
+    elif vectorstore is not None and not retrieved_personal_docs:
+        final_prompt_parts.append(textwrap.dedent("""
+        --- 個人知識庫參考 ---
+        (未從個人知識庫檢索到與問題相關的筆記)
+        """).strip())
+    elif vectorstore is None:
+         final_prompt_parts.append(textwrap.dedent("""
+        --- 個人知識庫參考 ---
+        (個人知識庫功能未啟用或未成功載入)
+        """).strip())
 
     # 3. 加入網路搜尋上下文 (如果網路搜尋被觸發且有結果或狀態提示)
     # 只有在主要意圖是 'chat' 且 AI 判斷需要網路搜尋時，web_search_context 才會有內容
@@ -470,7 +754,21 @@ if __name__ == "__main__":
     else:
         logging.error("無法初始化 Gemini 模型，因為 GOOGLE_API_KEY 未設定。")
         # 根據你的應用程式邏輯，這裡可以決定是否 sys.exit
-    
+
+    # 初始化或載入向量資料庫
+    # 需要提供文件路徑列表。這裡硬編碼一個測試文件路徑。
+    # 未來可以擴展從配置文件讀取文件列表或支持文件上傳後動態更新
+    document_paths_to_process = ["my_notes.txt"] # <--- 設定您個人文件的路徑列表
+
+    if config.get('GOOGLE_API_KEY'):
+        vectorstore = initialize_vector_store(
+            PERSIST_DIRECTORY,
+            document_paths_to_process,
+            config['GOOGLE_API_KEY'] # 傳遞金鑰
+        )
+    else:
+        logging.error("無法初始化向量資料庫，因為 GOOGLE_API_KEY 未設定。")
+        
     # 確保核心組件初始化成功
     if model is None:
         # 讓主程式決定是否因模型初始化失敗而退出
@@ -478,6 +776,23 @@ if __name__ == "__main__":
         logging.critical("AI 模型未成功初始化，某些功能可能無法使用或應用程式可能無法正常運行。")
 
     # 向量資料庫可能為 None，如果初始化失敗或沒有文件
+    print("--- 應用程式啟動初始化完成 ---")
+    print("-" * 40)
+
+    # --- 主要對話迴圈 (CLI 模式) ---
+    # 我們現在將 get_ai_response 函式應用到 CLI 對話中
+    print("--- 個人 AI 助理 (CLI 模式，整合個人知識庫與網路搜尋 RAG) ---")
+    print("輸入您的問題或指令，輸入 'exit', 'quit' 結束。")
+
+    # 根據 vectorstore 是否可用，提示個人知識庫狀態
+    if vectorstore is not None:
+        try:
+            count = vectorstore._collection.count()
+            print(f"個人知識庫已載入/創建，包含約 {count} 個片段。")
+        except Exception:
+             print("個人知識庫已載入/創建。")
+    else:
+        print("個人知識庫功能未啟用，因為向量資料庫未成功創建或載入。")
 
     print("-" * 40)
 
@@ -495,7 +810,7 @@ if __name__ == "__main__":
              print("AI 助理：獲取您的輸入時發生問題，請重試。")
              continue
 
-        # 檢查是否退出指令vectorstore, # 傳遞已初始化的向量資料庫
+        # 檢查是否退出指令
         if user_input.lower() in ['exit', 'quit']:
             print("AI 助理：再見！")
             logging.info("使用者要求退出，程式正常結束。")
@@ -510,7 +825,8 @@ if __name__ == "__main__":
         # 函式內部處理檢索、搜尋判斷、Prompt 構造和 AI 呼叫
         ai_response_text = get_ai_response(
             user_input,
-            model, # 傳遞已初始化的模型
+            model, # 傳遞已初始化的模型,
+            vectorstore,
             config.get('SEARCH_API_KEY'), # 從 config 獲取
             config.get('SEARCH_ENGINE_ID') # 從 config 獲取
             # 注意：decide_intent_and_query 和 perform_web_search 也需要 API keys
