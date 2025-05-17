@@ -1,0 +1,65 @@
+name: Deploy PWA to GitHub Pages
+
+on:
+  # 當推送到指定分支 (例如 main) 且指定路徑下的檔案有變更時觸發
+  push:
+    branches:
+      - master  # !!! 請確認這是你存放 PWA 程式碼並希望從中部署的分支 !!!
+    paths:
+      - 'frontend/**'  # !!! 請將 YOUR_PWA_FOLDER_NAME 替換為你 PWA 檔案夾的實際名稱 !!!
+      - '.github/workflows/deploy-gh-pages.yml' # 工作流程檔案本身變更時也觸發
+
+  # 允許你從 GitHub Actions 分頁手動觸發此工作流程
+  workflow_dispatch:
+
+# 設定 GITHUB_TOKEN 的權限，以允許部署到 GitHub Pages
+permissions:
+  contents: read    # 允許讀取儲存庫內容 (checkout)
+  pages: write      # 允許寫入 GitHub Pages
+  id-token: write   # 允許 OIDC 權杖 (用於 deploy-pages action)
+
+# 設定並行策略：只允許一個 "pages" 群組的部署同時運行
+concurrency:
+  group: "pages"
+  cancel-in-progress: false # 不要取消正在進行中的生產部署
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }} # 部署完成後網站的 URL
+    runs-on: ubuntu-latest # 在最新的 Ubuntu 環境中運行
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # 步驟 1: 拉取你的儲存庫程式碼
+
+      # 如果你的 PWA 需要建置步驟 (例如使用 Node.js 的 npm run build)
+      # 請取消註解並修改以下步驟。對於純靜態 HTML/CSS/JS，通常不需要。
+      # - name: Setup Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: '20' # 或你需要的 Node.js 版本
+      #     cache: 'npm'       # 或 'yarn', 'pnpm'
+      # - name: Install dependencies
+      #   run: npm ci # 或 yarn install --frozen-lockfile
+      #   working-directory: ./YOUR_PWA_FOLDER_NAME # 如果 package.json 在 PWA 資料夾內
+      # - name: Build PWA
+      #   run: npm run build # 或你的建置命令
+      #   working-directory: ./YOUR_PWA_FOLDER_NAME # 假設建置輸出在 PWA 資料夾的 dist 子目錄
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5 # 步驟 2: 設定 GitHub Pages 環境
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3 # 步驟 3: 上傳 PWA 檔案作為 artifact
+        with:
+          # !!! 這是最重要的一步：指定包含你 PWA 靜態檔案的資料夾路徑 !!!
+          # 將 './YOUR_PWA_FOLDER_NAME' 替換為你實際的 PWA 資料夾路徑。
+          # 例如，如果你的 PWA 檔案 (index.html, sw.js, manifest.json 等) 
+          # 在儲存庫根目錄下一個名為 "frontend-pwa" 的資料夾中，這裡就填 './frontend-pwa'
+          # 如果你的 PWA 有建置步驟，且輸出到例如 'frontend-pwa/dist'，那這裡就填 './frontend-pwa/dist'
+          path: './frontend' 
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4 # 步驟 4: 將 artifact 部署到 GitHub Pages
