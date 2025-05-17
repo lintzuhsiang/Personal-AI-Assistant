@@ -23,7 +23,9 @@ const showNewsletterButton = document.getElementById('show-newsletter-button');
 const newsletterContentDiv = document.getElementById('newsletter-content');
 
 // FastAPI 後端 API 的端點 URL
-const API_BASE_URL = 'http://127.0.0.1:8000'; // 基礎 URL
+const IS_DEVELOPMENT = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+// const API_BASE_URL = IS_DEVELOPMENT ? 'http://localhost:8000' : 'https://personal-ai-assistant-471912625165.us-east1.run.app';
+const API_BASE_URL = 'https://personal-ai-assistant-471912625165.us-east1.run.app';
 const API_CHAT_URL = `${API_BASE_URL}/chat`; // 聊天端點 URL
 const API_HISTORY_URL = `${API_BASE_URL}/history`; // 歷史端點 URL
 const API_UPLOAD_AUDIO_URL = `${API_BASE_URL}/upload_audio_for_summary`; // <--- 新增：音頻上傳處理端點 URL
@@ -31,8 +33,8 @@ const API_LATEST_NEWSLETTER_URL = `${API_BASE_URL}/latest_newsletter`; // <--- �
 
 // 暫時使用固定的 session ID，這應該與後端使用的 session_id 一致
 // 未來可以通過使用者登入等方式獲取真正的 session ID
-const CURRENT_SESSION_ID = 'test_session_123_1'; // <--- 確保這個與後端保存歷史使用的 ID 一致
-
+// const CURRENT_SESSION_ID = 'test_session_123_1'; // <--- 確保這個與後端保存歷史使用的 ID 一致
+let currentSessionId = localStorage.getItem('ai_assistant_pwa_session_id'); // 從 localStorage 嘗試載入
 
 // --- 在聊天框中顯示訊息 ---
 // 增加 sender 參數來判斷是使用者訊息還是 AI 訊息
