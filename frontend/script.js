@@ -27,6 +27,7 @@ const IS_DEVELOPMENT = window.location.hostname === 'localhost' || window.locati
 // const API_BASE_URL = IS_DEVELOPMENT ? 'http://localhost:8000' : 'https://personal-ai-assistant-471912625165.us-east1.run.app';
 const API_BASE_URL = 'https://personal-ai-assistant-471912625165.us-east1.run.app';
 const API_CHAT_URL = `${API_BASE_URL}/chat`; // 聊天端點 URL
+const API_CHAT_STREAM_URL = `${API_BASE_URL}/chat_stream`; // 新的串流端點 (假設後端已改為 GET)
 const API_HISTORY_URL = `${API_BASE_URL}/history`; // 歷史端點 URL
 const API_UPLOAD_AUDIO_URL = `${API_BASE_URL}/upload_audio_for_summary`; // <--- 新增：音頻上傳處理端點 URL
 const API_LATEST_NEWSLETTER_URL = `${API_BASE_URL}/latest_newsletter`; // <--- 新增：獲取最新 Newsletter 端點 URL
@@ -36,31 +37,49 @@ const API_LATEST_NEWSLETTER_URL = `${API_BASE_URL}/latest_newsletter`; // <--- �
 // const CURRENT_SESSION_ID = 'test_session_123_1'; // <--- 確保這個與後端保存歷史使用的 ID 一致
 let currentSessionId = localStorage.getItem('ai_assistant_pwa_session_id'); // 從 localStorage 嘗試載入
 
-// --- 在聊天框中顯示訊息 ---
-// 增加 sender 參數來判斷是使用者訊息還是 AI 訊息
-function appendMessage(messageText, sender) {
+// --- 修改 appendMessage 函式以支援串流 ---
+function appendMessage(messageText, sender, isStreaming = false) {
     const messageElement = document.createElement('div');
-    messageElement.classList.add('message', sender === 'user' ? 'user-message' : 'ai-message');
+    messageElement.classList.add('message');
+    let prefix = "";
 
-    // --- 新增：如果發送者是 AI，則將 Markdown 轉為 HTML ---
-    // 檢查 sender 是否為 'ai' 並且 Marked.js 函式庫 (marked) 是否已載入
-    if (sender === 'ai' && typeof marked !== 'undefined') {
-        // marked.parse() 將 Markdown 文字轉換為 HTML 字串
-        // innerHTML 屬性將 HTML 字串解析並添加到元素中
-        // 注意：使用 innerHTML 時要確保來源內容是可信的，這裡我們處理 AI 的回覆，通常認為是可信的
-        messageElement.innerHTML = marked.parse(messageText);
-    } else {
-        // 如果是使用者訊息，或者 Marked.js 未載入，則使用 textContent 顯示純文本
-        // textContent 更安全，因為它不會解析 HTML 標籤
+    if (sender === 'user') {
+        messageElement.classList.add('user-message');
+        prefix = "你: ";
+        messageElement.textContent = prefix + messageText; // 使用者訊息直接用 textContent
+    } else if (sender === 'ai') {
+        messageElement.classList.add('ai-message');
+        prefix = "AI: ";
+        if (isStreaming) {
+            if (currentAiMessageElement) { // 如果已有 AI 訊息元素在串流中，追加內容
+                // 移除"思考中..." (如果有的話)
+                if (currentAiMessageElement.textContent === `${prefix}思考中...` || currentAiMessageElement.textContent === `${prefix}...`) {
+                    currentAiMessageElement.textContent = prefix;
+                }
+                currentAiMessageElement.textContent += messageText;
+                chatBox.scrollTop = chatBox.scrollHeight; // 保持滾動
+                return; // 不創建新元素，直接返回
+            } else { // 這是 AI 串流訊息的第一塊
+                messageElement.textContent = prefix + (messageText || "..."); // 初始文本或等待符
+                currentAiMessageElement = messageElement; // 保存這個元素以便追加
+            }
+        } else { // 非串流的 AI 訊息，或串流結束後的最終渲染
+            if (typeof marked !== 'undefined') {
+                messageElement.innerHTML = prefix + marked.parse(messageText);
+            } else {
+                messageElement.textContent = prefix + messageText;
+            }
+            currentAiMessageElement = null; // 清除追蹤
+        }
+    } else { // system or error messages
+        messageElement.classList.add(sender === 'system' ? 'system-message' : 'error-message');
         messageElement.textContent = messageText;
+        currentAiMessageElement = null; // 清除追蹤
     }
 
-    chatBox.appendChild(messageElement); // 將訊息元素添加到聊天框底部
-
-    // 自動滾動到最新訊息
+    chatBox.appendChild(messageElement);
     chatBox.scrollTop = chatBox.scrollHeight;
 }
-
 // --- 從後端載入對話歷史 ---
 async function loadChatHistory() {
     console.log("正在載入對話歷史..."); // 除錯信息，會在瀏覽器的 Developer Console 顯示
@@ -109,60 +128,112 @@ async function loadChatHistory() {
     }
 }
 
+// --- 新增：串流結束後，對 AI 訊息進行最終處理 (例如 Markdown 渲染) ---
+function finalizeAiMessageStreaming() {
+    if (currentAiMessageElement && typeof marked !== 'undefined') {
+        const fullTextWithPrefix = currentAiMessageElement.textContent;
+        const prefix = "AI: ";
+        if (fullTextWithPrefix.startsWith(prefix)) {
+            const markdownText = fullTextWithPrefix.substring(prefix.length);
+            currentAiMessageElement.innerHTML = prefix + marked.parse(markdownText);
+        }
+    }
+    currentAiMessageElement = null; // 清除追蹤的 AI 訊息元素
+}
 
 // --- 發送訊息到後端並處理回應 ---
-async function sendMessage() {
-    const message = userInput.value.trim(); // 獲取使用者輸入並移除前後空白
+// --- 新的 sendMessageSSE 函式，用於串流聊天 ---
+async function sendMessageSSE() {
+    const messageText = userInput.value.trim();
+    if (!messageText) return;
 
-    // 如果輸入為空，則不發送
-    if (!message) {
-        return;
+    appendMessage(messageText, 'user');
+    userInput.value = '';
+    sendButton.disabled = true; // 禁用發送按鈕，防止重複發送
+
+    // 為 AI 的回應先創建一個「思考中」的訊息元素
+    appendMessage("思考中...", 'ai', true); // isStreaming = true, 會設定 currentAiMessageElement
+
+    const url = new URL(API_CHAT_STREAM_URL);
+    url.searchParams.append('message', messageText);
+    if (currentSessionId) {
+        url.searchParams.append('session_id', currentSessionId);
     }
 
-    // 在聊天框中顯示使用者訊息
-    appendMessage(message, 'user'); // 明確 sender 是 'user'
+    // 關閉任何已存在的 EventSource 連線
+    if (eventSource) {
+        eventSource.close();
+    }
 
-    // 清空輸入框
-    userInput.value = '';
+    eventSource = new EventSource(url.toString());
 
-    // 準備發送給後端的資料 (JSON 格式)
-    const requestBody = {
-        message: message
+    eventSource.onopen = () => {
+        console.log("SSE Connection opened successfully.");
+        // "思考中..." 的訊息已經由 appendMessage 處理了
     };
 
-    try {
-        // 使用 fetch API 發送 POST 請求到後端
-        const response = await fetch(API_CHAT_URL, {
-            method: 'POST', // 請求方法為 POST
-            headers: {
-                'Content-Type': 'application/json' // 告訴後端發送的資料是 JSON 格式
-            },
-            body: JSON.stringify(requestBody) // 將 JavaScript 對象轉換為 JSON 字串作為請求體
-        });
-
-        // 檢查 HTTP 狀態碼
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('發送訊息錯誤:', response.status, errorText);
-            appendMessage('AI 助理：發送訊息失敗或後台服務器返回錯誤。請檢查後台日誌。', 'ai-message');
-            return;
+    eventSource.onmessage = (event) => {
+        try {
+            const eventData = JSON.parse(event.data);
+            if (eventData.text) {
+                // 如果 "思考中..." 還在，先清除它 (第一次收到有效 text chunk 時)
+                if (currentAiMessageElement && 
+                    (currentAiMessageElement.textContent === "AI: 思考中..." || currentAiMessageElement.textContent === "AI: ...")) {
+                    currentAiMessageElement.textContent = "AI: "; 
+                }
+                appendMessage(eventData.text, 'ai', true); // isStreaming = true
+            }
+            // 更新 session_id (如果後端在串流中返回了新的)
+            if (eventData.session_id && (!currentSessionId || currentSessionId !== eventData.session_id)) {
+                currentSessionId = eventData.session_id;
+                localStorage.setItem('ai_assistant_pwa_session_id', currentSessionId);
+                updateSessionIdDisplay();
+                console.log("從 SSE 更新 Session ID:", currentSessionId);
+            }
+        } catch (e) {
+            console.error("解析 SSE message 數據錯誤:", e, "原始數據:", event.data);
+            // 如果解析失敗，可能直接將原始數據作為文本片段追加，或顯示錯誤
+            // appendMessage(event.data, 'ai', true); // 作為備用方案
         }
+    };
 
-        // 解析後端返回的 JSON 回應
-        const responseData = await response.json();
+    eventSource.addEventListener('end', (event) => {
+        console.log("SSE Stream ended by server:", event.data);
+        finalizeAiMessageStreaming(); // 最終處理 AI 訊息 (例如 Markdown 渲染)
+        eventSource.close();
+        sendButton.disabled = false; // 重新啟用發送按鈕
+        
+        // 你也可以在這裡從 event.data 解析 session_id (如果後端有傳)
+        try {
+            const endData = JSON.parse(event.data);
+            if (endData.session_id && (!currentSessionId || currentSessionId !== endData.session_id)) {
+                currentSessionId = endData.session_id;
+                localStorage.setItem('ai_assistant_pwa_session_id', currentSessionId);
+                updateSessionIdDisplay();
+            }
+        } catch(e) { /* 解析失敗則忽略 */ }
+    });
 
-        // 在聊天框中顯示 AI 的回應
-        if (responseData && responseData.reply) {
-            appendMessage(responseData.reply, 'ai'); // 明確 sender 是 'ai'
-        } else {
-             appendMessage('AI 助理：未能收到有效的回答。', 'ai-message');
+    eventSource.addEventListener('error', (event) => { // 監聽後端發送的 'error' 事件
+        console.error("SSE Custom Error Event from server:", event.data);
+        finalizeAiMessageStreaming();
+        try {
+            const errorData = JSON.parse(event.data);
+            addMessageToChatbox(`AI 處理錯誤: ${errorData.error} ${errorData.detail || ''}`, 'error', false);
+        } catch (e) {
+            addMessageToChatbox('AI 處理時發生未知伺服器錯誤。', 'error', false);
         }
+        if (eventSource) eventSource.close(); // 確保關閉
+        sendButton.disabled = false;
+    });
 
-    } catch (error) {
-        // 捕獲發送請求或處理回應時的錯誤 (例如網絡錯誤)
-        console.error('發送訊息錯誤:', error);
-        appendMessage('AI 助理：發送訊息或獲取回應時發生網絡錯誤。請檢查後台服務器是否運行。', 'ai-message');
-    }
+    eventSource.onerror = (error) => { // 監聽 EventSource 連線本身的錯誤
+        console.error("EventSource connection failed:", error);
+        finalizeAiMessageStreaming();
+        addMessageToChatbox('與 AI 的連接中斷或發生錯誤。', 'error', false);
+        if (eventSource) eventSource.close(); // 確保關閉
+        sendButton.disabled = false;
+    };
 }
 
 
@@ -501,14 +572,14 @@ document.addEventListener('DOMContentLoaded', function() {
     // 在頁面載入完成時，載入對話歷史
     loadChatHistory();
 
-    // 設置聊天輸入和發送按鈕的事件監聽器
-    sendButton.addEventListener('click', sendMessage);
-    userInput.addEventListener('keypress', function(event) {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-            sendMessage();
-        }
-    });
+     // --- 修改事件監聽器以使用 sendMessageSSE ---
+     sendButton.addEventListener('click', sendMessageSSE);
+     userInput.addEventListener('keypress', function(event) {
+         if (event.key === 'Enter' && !sendButton.disabled) { // 檢查按鈕是否已禁用
+             event.preventDefault();
+             sendMessageSSE();
+         }
+     });
 
      // 設置文件上傳按鈕的事件監聽器
      uploadButton.addEventListener('click', uploadDocument);
