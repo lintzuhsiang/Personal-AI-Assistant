@@ -31,7 +31,6 @@ from ai_assistant_core import (
     process_and_add_to_vector_store,
     generate_ai_newsletter,
     transcribe_audio,
-    PERSIST_DIRECTORY, # 導入向量資料庫儲存路徑
     USER_AI_INTERESTS
     # 如果您將 GOOGLE_API_KEY, SEARCH_API_KEY, SEARCH_ENGINE_ID 也定義在 core 模組中並需要直接訪問，
     # 您可能需要從 core 模組導入或通過 core 模組的函數獲取
@@ -115,7 +114,7 @@ async def startup_event():
     """在應用啟動時載入環境變數並初始化 AI 模型和向量資料庫。"""
     logging.info("應用程式啟動中...")
 
-    global model, vectorstore, GOOGLE_API_KEY, SEARCH_API_KEY, SEARCH_ENGINE_ID, OPENAI_API_KEY # 聲明將要修改全局變數
+    global model, GOOGLE_API_KEY, SEARCH_API_KEY, SEARCH_ENGINE_ID, OPENAI_API_KEY, DATABASE_URL # 聲明將要修改全局變數
 
     # 1. 載入環境變數
     config_from_core = load_env_variables() # 假設這個函式返回一個包含所有金鑰的字典
@@ -123,6 +122,7 @@ async def startup_event():
     SEARCH_API_KEY = config_from_core.get('SEARCH_API_KEY')
     SEARCH_ENGINE_ID = config_from_core.get('SEARCH_ENGINE_ID')
     OPENAI_API_KEY = config_from_core.get('OPENAI_API_KEY')
+    DATABASE_URL = config_from_core.get("DATABASE_URL") # 從環境變數讀取
 
     if not GOOGLE_API_KEY:
          logging.error("缺少 GOOGLE_API_KEY 環境變數，無法初始化模型。")
@@ -146,6 +146,10 @@ async def startup_event():
             logging.error(f"初始化 OpenAI 客戶端失敗: {e}")
     else:
         logging.warning("缺少 OPENAI_API_KEY，語音轉文字功能可能無法使用。")
+    
+    if not DATABASE_URL:
+        logging.error("DATABASE_URL 環境變數未設定，向量資料庫可能無法初始化。")
+        # 根據你的邏輯，這裡可能需要更嚴格的處理，例如不啟動向量儲存
 
     # 1. 初始化 AI 模型
     model = initialize_gemini_model(GOOGLE_API_KEY) # 使用讀取的金鑰初始化
@@ -153,7 +157,22 @@ async def startup_event():
     # 2. 初始化向量資料庫
     # 假設我們處理單個 my_notes.txt 文件
     document_paths_to_process = ["my_notes.txt"] # <--- 設定您個人文件的路徑列表
-    vectorstore = initialize_vector_store(PERSIST_DIRECTORY, document_paths_to_process, GOOGLE_API_KEY) # 需要 API 金鑰用於嵌入
+
+    if GOOGLE_API_KEY and DATABASE_URL: # 確保金鑰和DB URL都存在
+        global vectorstore # 聲明修改全局 vectorstore
+        vectorstore = initialize_vector_store(
+            document_paths_to_process, 
+            GOOGLE_API_KEY,
+            DATABASE_URL # 傳遞資料庫連接字串
+            # embedding_model_name 可以使用 initialize_vector_store 中的預設值
+        )
+    else:
+        logging.warning("由於缺少 GOOGLE_API_KEY 或 DATABASE_URL，跳過向量資料庫初始化。")
+
+    if vectorstore:
+        logging.info("PGVector 向量資料庫初始化完成。")
+    else:
+        logging.warning("PGVector 向量資料庫初始化失敗或未啟用。")
 
     # --- 新增：創建資料庫表 ---
     logging.info("檢查並創建資料庫表...")

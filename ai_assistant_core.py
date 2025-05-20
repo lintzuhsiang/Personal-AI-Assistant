@@ -11,7 +11,8 @@ import json
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_community.vectorstores import Chroma
+# from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import PGVector  # <--- 新增 PGVector 導入
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from typing import Optional # 用於類型提示 Optional
 import openai
@@ -33,10 +34,14 @@ logging.basicConfig(level=logging.INFO,
 # SEARCH_ENGINE_ID: Optional[str] = None # 在載入函式中賦值
 
 # --- 定義向量資料庫的儲存路徑 ---
-PERSIST_DIRECTORY = "vector_db"
 DEFAULT_GEMINI_MODEL_NAME = 'gemini-1.5-flash-latest'
 DEFAULT_EMBEDDING_MODEL_NAME = 'models/text-embedding-004'
 DEFAULT_WHISPER_MODEL_NAME = 'whisper-1'
+PGVECTOR_COLLECTION_NAME = "ai_assistant_document_vectors" # 給你的向量集合取個名字
+
+
+# --- 使用者興趣的關鍵詞列表 --- 
+USER_AI_INTERESTS = ["AI", "LLM", "ChatGPT", "Gemini", "Google AI"] 
 
 # --- 將環境變數載入封裝成函式 ---
 def load_env_variables() -> dict: # 返回一個字典
@@ -57,6 +62,10 @@ def load_env_variables() -> dict: # 返回一個字典
     if not config['OPENAI_API_KEY']:
         logging.warning("警告：OPENAI_API_KEY 環境變數未設定。語音轉文字 (STT) 功能將無法使用。")
 
+    config['DATABASE_URL'] = os.environ.get('DATABASE_URL')
+    if not config['DATABASE_URL']:
+        logging.warning("DATABASE_URL 環境變數未設定。資料庫功能將無法使用。")
+    
     logging.info("環境變數載入完成。")
     return config # 返回設定字典
 
@@ -304,91 +313,84 @@ def load_and_chunk_document(file_path: str) -> list[Document]:
 
 
 # --- 將向量資料庫初始化/載入封裝成函式 (處理持久化) ---
-def initialize_vector_store(persist_directory: str, document_paths: list[str], google_api_key: str, embedding_model_name: str = DEFAULT_EMBEDDING_MODEL_NAME) -> Optional[Chroma]:
+def initialize_vector_store(db_connection_string: str, document_paths: list[str], google_api_key: str, embedding_model_name: str = DEFAULT_EMBEDDING_MODEL_NAME) -> Optional[PGVector]:
     """
-    初始化或載入向量資料庫。如果持久化目錄存在則載入，否則處理文件並創建。
+    初始化 PGVector 向量資料庫。如果提供了文件路徑，則處理並添加文件。
 
     Args:
-        persist_directory (str): 向量資料庫儲存的目錄。
+        db_connection_string (str): 向量資料庫儲存的目錄。
         document_paths (list[str]): 需要處理的文件路徑列表。
         google_api_key (str): Google API 金鑰，用於嵌入模型。
         embedding_model_name (str): 用於生成嵌入的模型名稱。
-
-    Returns:
-        Optional[Chroma]: 初始化或載入成功的 Chroma 向量資料庫實例，失敗則返回 None。
     """
-    logging.info(f"嘗試初始化向量資料庫。持久化目錄: {persist_directory}")
+    logging.info(f"嘗試初始化 PGVector 向量資料庫。集合名稱: {PGVECTOR_COLLECTION_NAME}")
+
 
     # 確保有 API 金鑰來創建嵌入對象
     if not google_api_key:
-         logging.error("缺少 Google API 金鑰，無法創建嵌入模型或向量資料庫。")
-         return None
-
+        logging.error("缺少 Google API 金鑰，無法創建嵌入模型或向量資料庫。")
+        return None
+    
+    if not db_connection_string:
+        logging.error("缺少資料庫連接字串，無法初始化 PGVector。")
+        return None
+    
     try:
-         # 準備 LangChain 嵌入模型對象
-         logging.info(f"準備使用嵌入模型 '{embedding_model_name}' 創建 LangChain Embedding 對象...")
-         langchain_gemini_embeddings = GoogleGenerativeAIEmbeddings(
-             model=embedding_model_name,
-             google_api_key=google_api_key # 傳遞 API 金鑰
-         )
-         logging.info("成功創建 LangChain 的 GoogleGenerativeAIEmbeddings 對象。")
+        # 準備 LangChain 嵌入模型對象
+        logging.info(f"準備使用嵌入模型 '{embedding_model_name}' 創建 LangChain Embedding 對象...")
+        langchain_gemini_embeddings = GoogleGenerativeAIEmbeddings(
+            model=embedding_model_name,
+            google_api_key=google_api_key # 傳遞 API 金鑰
+        )
+        logging.info("成功創建 LangChain 的 GoogleGenerativeAIEmbeddings 對象。")
 
-         # --- 判斷是創建新的資料庫還是載入現有的 ---
-         if os.path.exists(persist_directory):
-             # 如果儲存目錄已存在，則載入現有的向量資料庫
-             logging.info(f"載入現有的 Chroma 向量資料庫從目錄: {persist_directory}")
-             # 載入時也需要提供相同的嵌入對象，確保兼容性
-             vectorstore = Chroma(persist_directory=persist_directory, embedding_function=langchain_gemini_embeddings)
-             logging.info("成功載入現有的 Chroma 向量資料庫。")
-             return vectorstore
+        # 初始化 PGVector store
+        # 它會連接到你的 PostgreSQL 資料庫，並使用指定的集合名稱（類似於表名）
+        # 如果集合不存在，它通常會自動創建
+        vectorstore = PGVector(
+            connection_string=db_connection_string,
+            embedding_function=langchain_gemini_embeddings,
+            collection_name=PGVECTOR_COLLECTION_NAME,
+            # distance_strategy=DistanceStrategy.COSINE, # 可以指定距離策略，預設是 COSINE
+        )
+        logging.info(f"PGVector 實例已初始化。連接到資料庫並使用集合 '{PGVECTOR_COLLECTION_NAME}'。")
+        
+        # 可選：檢查集合是否真的存在或是否需要手動調用 create_collection
+        # 通常，add_documents 會觸發集合的創建（如果不存在）
+        # vectorstore.create_collection() # 如果需要顯式創建
+        
+        all_chunks = []
+        for doc_path in document_paths:
+            if os.path.exists(doc_path):
+                logging.info(f"處理文件: {doc_path}")
+                chunks = load_and_chunk_document(doc_path) # 使用之前的 load_and_chunk_document 函式
+                all_chunks.extend(chunks)
+                logging.info(f"文件 {doc_path} 處理完成，生成 {len(chunks)} 個片段。總片段數: {len(all_chunks)}")
+            else:
+                logging.warning(f"文件不存在，跳過處理：{doc_path}")
 
-         else:
-             # 如果儲存目錄不存在，則需要處理文件並創建新的資料庫
-             logging.warning(f"儲存目錄 '{persist_directory}' 不存在。開始處理文件並創建新的資料庫。")
 
-             all_chunks = []
-             for doc_path in document_paths:
-                 if os.path.exists(doc_path):
-                     logging.info(f"處理文件: {doc_path}")
-                     chunks = load_and_chunk_document(doc_path) # 使用之前的 load_and_chunk_document 函式
-                     all_chunks.extend(chunks)
-                     logging.info(f"文件 {doc_path} 處理完成，生成 {len(chunks)} 個片段。總片段數: {len(all_chunks)}")
-                 else:
-                     logging.warning(f"文件不存在，跳過處理：{doc_path}")
+        if all_chunks:
+            logging.info(f"開始添加 {len(all_chunks)} 個初始文件片段到 PGVector 集合 '{PGVECTOR_COLLECTION_NAME}'...")
+            vectorstore.add_documents(all_chunks)
+            logging.info("成功添加初始文件片段到 PGVector。")
 
+        else:
+            logging.info("沒有提供初始文件路徑，或文件未找到/為空，跳過初始文件添加。")
 
-             if all_chunks:
-                 # 建立並填充向量資料庫並儲存到磁碟
-                 logging.info(f"開始創建並填充 Chroma 向量資料庫到目錄: {persist_directory}，共 {len(all_chunks)} 個片段...")
-                 vectorstore = Chroma.from_documents(
-                     documents=all_chunks, # 所有文件片段列表
-                     embedding=langchain_gemini_embeddings, # 嵌入對象
-                     persist_directory=persist_directory # 指定儲存目錄
-                 )
-                 logging.info(f"成功創建並填充 Chroma 向量資料庫到目錄: {persist_directory}。")
-
-                 # 持久化儲存 (確保資料寫入磁碟)
-                 vectorstore.persist()
-                 logging.info("向量資料庫已持久化儲存。")
-                 return vectorstore
-
-             else:
-                 logging.warning("沒有找到有效的文檔可供處理，未能創建向量資料庫。")
-                 logging.warning("\n沒有找到有效的文檔，未能創建向量資料庫。請確認文件路徑是否正確。")
-                 return None # 沒有片段，無法創建資料庫
-
+        return vectorstore
 
     except ImportError:
-         logging.error("需要安裝 'langchain-google-genai' 和 'chromadb' 函式庫才能初始化向量資料庫。")
-         logging.error("請運行指令：python -m pip install langchain-google-genai chromadb")
+         logging.error("需要安裝 'langchain-google-genai' 和 'pgvector' 函式庫才能初始化向量資料庫。")
+         logging.error("請運行指令：python -m pip install langchain-google-genai pgvector")
          return None
     except Exception as e:
-        logging.error(f"初始化向量資料庫時發生錯誤: {e}", exc_info=True)
+        logging.error(f"初始化 PGVector 向量資料庫時發生錯誤: {e}", exc_info=True)
         return None # 初始化失敗返回 None
 
 
 # --- 建立處理單一文件並加入現有向量資料庫的函式 ---
-def process_and_add_to_vector_store(file_path: str, vectorstore: Chroma, embedding_model_name: str, google_api_key: str) -> bool:
+def process_and_add_to_vector_store(file_path: str, vectorstore: PGVector) -> bool:
     """
     載入、分割指定文件，並將其內容添加到現有的向量資料庫中。
 
@@ -408,54 +410,24 @@ def process_and_add_to_vector_store(file_path: str, vectorstore: Chroma, embeddi
     if not os.path.exists(file_path):
         logging.error(f"文件不存在：{file_path}，無法添加。")
         return False
-    if not google_api_key:
-         logging.error("缺少 Google API 金鑰，無法創建嵌入模型或添加到向量資料庫。")
-         return False
 
-    logging.info(f"開始處理文件 '{file_path}' 並添加到向量資料庫...")
+    logging.info(f"開始處理文件 '{os.path.basename(file_path)}' 並添加到 PGVector...")
 
     try:
-        # 1. 載入並分割文件 (使用之前定義的函式)
-        # 這個函式內部已經處理了支援的文件類型，不支援的會返回空列表
-        document_chunks = load_and_chunk_document(file_path)
+        document_chunks = load_and_chunk_document(file_path) # load_and_chunk_document 保持不變
 
         if not document_chunks:
-            logging.warning(f"文件 '{file_path}' 未能生成任何文件片段，跳過添加。請確認文件內容及類型是否正確。")
-            return False # 沒有片段，視為失敗
+            logging.warning(f"文件 '{os.path.basename(file_path)}' 未能生成任何文件片段，跳過添加。")
+            return False
 
-        # 2. 準備嵌入模型對象 (與初始化向量庫時使用相同的模型和金鑰)
-        logging.info(f"準備使用嵌入模型 '{embedding_model_name}' 創建 LangChain Embedding 對象用於添加新文檔...")
-        langchain_gemini_embeddings = GoogleGenerativeAIEmbeddings(
-            model=embedding_model_name,
-            google_api_key=google_api_key
-        )
-        logging.info("成功創建 LangChain 的 GoogleGenerativeAIEmbeddings 對象用於添加。")
-
-        # 3. 將文件片段添加到現有的向量資料庫
-        # vectorstore.add_documents 方法可以將新的 Document 對象列表添加到現有資料庫
-        # 它會自動為新文檔生成嵌入，並儲存到 Chroma 中
-        logging.info(f"開始添加 {len(document_chunks)} 個文件片段到向量資料庫...")
-        vectorstore.add_documents(
-            documents=document_chunks,
-            embedding=langchain_gemini_embeddings # 提供嵌入對象，它會自動為新文檔生成嵌入
-        )
-        logging.info(f"成功添加文件片段到向量資料庫。")
-
-        # 4. 持久化儲存變更 (非常重要！)
-        # 如果資料庫是持久化的，添加文檔後需要呼叫 persist() 方法來保存變更
-        # 檢查 vectorstore 是否有 persist 方法 (內存資料庫可能沒有)
-        if hasattr(vectorstore, 'persist') and callable(vectorstore.persist):
-            vectorstore.persist()
-            logging.info("向量資料庫已持久化變更到磁碟。")
-        else:
-            logging.info("向量資料庫不支援持久化或未配置持久化路徑，變更僅在運行期間有效。")
-
-
-        return True # 成功處理並添加
+        logging.info(f"開始添加 {len(document_chunks)} 個文件片段到 PGVector...")
+        vectorstore.add_documents(documents=document_chunks) # 使用 PGVector 的 add_documents
+        logging.info(f"成功添加文件片段到 PGVector。PGVector 會自動處理持久化到 PostgreSQL。")
+        return True
 
     except Exception as e:
-        logging.error(f"處理文件 '{file_path}' 並添加到向量資料庫時發生錯誤: {e}", exc_info=True)
-        return False # 處理失敗
+        logging.error(f"處理文件 '{os.path.basename(file_path)}' 並添加到 PGVector 時發生錯誤: {e}", exc_info=True)
+        return False
 
 
 # --- 新增：建立語音轉文字 (STT) 函式 ---
@@ -624,14 +596,14 @@ def generate_ai_newsletter(interests: list[str], model: Optional[genai.Generativ
 
 
 # --- 將核心 RAG 回答邏輯封裝成函式 ---
-def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[Chroma], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
+def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[PGVector], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
     """
     根據使用者輸入，結合個人知識庫和網路搜尋，生成 AI 的回答。
 
     Args:
         user_input (str): 使用者的問題或指令。
         model: 已初始化好的 Gemini 模型實例。
-        vectorstore (Optional[Chroma]): 已初始化好的個人知識庫向量資料庫實例，可能為 None。
+        vectorstore (Optional[PGVector]): 已初始化好的個人知識庫向量資料庫實例，可能為 None。
         search_api_key (Optional[str]): Google Search API 金鑰，可能為 None。
         search_engine_id (Optional[str]): Google Search Engine ID，可能為 None。
 
@@ -908,13 +880,18 @@ if __name__ == "__main__":
 
     # --- 載入環境變數 ---
     config = load_env_variables() # 接收設定字典
+    GOOGLE_API_KEY_LOCAL = config.get('GOOGLE_API_KEY')
+    DATABASE_URL_LOCAL = config.get('DATABASE_URL')
+    SEARCH_API_KEY_LOCAL = config.get('SEARCH_API_KEY')
+    SEARCH_ENGINE_ID_LOCAL = config.get('SEARCH_ENGINE_ID')
+    OPENAI_API_KEY_LOCAL = config.get('OPENAI_API_KEY')
 
     # --- 初始化核心組件 (AI 模型 和 向量資料庫) ---
     print("--- 應用程式啟動初始化 ---")
     # 使用 config 中的金鑰初始化模型
     model = None
-    if config.get('GOOGLE_API_KEY'):
-        model = initialize_gemini_model(config['GOOGLE_API_KEY'])
+    if GOOGLE_API_KEY_LOCAL:
+        model = initialize_gemini_model(GOOGLE_API_KEY_LOCAL)
     else:
         logging.error("無法初始化 Gemini 模型，因為 GOOGLE_API_KEY 未設定。")
         # 根據你的應用程式邏輯，這裡可以決定是否 sys.exit
@@ -923,12 +900,13 @@ if __name__ == "__main__":
     # 需要提供文件路徑列表。這裡硬編碼一個測試文件路徑。
     # 未來可以擴展從配置文件讀取文件列表或支持文件上傳後動態更新
     document_paths_to_process = ["my_notes.txt"] # <--- 設定您個人文件的路徑列表
-
-    if config.get('GOOGLE_API_KEY'):
+    vectorstore = None 
+    if GOOGLE_API_KEY_LOCAL and DATABASE_URL_LOCAL:
         vectorstore = initialize_vector_store(
-            PERSIST_DIRECTORY,
+            DATABASE_URL_LOCAL,
             document_paths_to_process,
-            config['GOOGLE_API_KEY'] # 傳遞金鑰
+            GOOGLE_API_KEY_LOCAL, # 傳遞金鑰
+            DEFAULT_EMBEDDING_MODEL_NAME
         )
     else:
         logging.error("無法初始化向量資料庫，因為 GOOGLE_API_KEY 未設定。")
@@ -1015,10 +993,10 @@ if __name__ == "__main__":
     # 根據 vectorstore 是否可用，提示個人知識庫狀態
     if vectorstore is not None:
         try:
-            count = vectorstore._collection.count()
-            print(f"個人知識庫已載入/創建，包含約 {count} 個片段。")
-        except Exception:
-             print("個人知識庫已載入/創建。")
+            print(f"PGVector 向量資料庫已載入/創建。(集合名稱: {PGVECTOR_COLLECTION_NAME})")
+        except Exception as e:
+            logging.error(f"檢查 PGVector 狀態時出錯（或它未成功初始化）: {e}")
+            print("PGVector 向量資料庫可能已載入，但檢查詳細狀態時出錯。")
     else:
         print("個人知識庫功能未啟用，因為向量資料庫未成功創建或載入。")
 
