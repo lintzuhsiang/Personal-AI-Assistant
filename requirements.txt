@@ -134,3 +134,4 @@ zipp==3.21.0
 zstandard==0.23.0
 psycopg2-binary
 langchain-community
+pgvector

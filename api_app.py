@@ -1,6 +1,7 @@
 # 導入 FastAPI 相關模組
 import uuid
 from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi.responses import StreamingResponse # <--- 新增 StreamingResponse
 from pydantic import BaseModel # 用於定義請求和回應的資料模型
 import uvicorn # 用於運行 ASGI 服務器
 from typing import Annotated, Optional
@@ -28,6 +29,7 @@ from ai_assistant_core import (
     initialize_gemini_model,
     initialize_vector_store,
     get_ai_response,
+    get_ai_response_stream,
     process_and_add_to_vector_store,
     generate_ai_newsletter,
     transcribe_audio,
@@ -248,6 +250,85 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     # 返回 AI 的回答，包裝在 ChatResponse 資料模型中
     return ChatResponse(reply=ai_response_text, session_id=current_session_id)
+
+# --- 新增：串流聊天 API 端點 ---
+@app.post("/chat_stream")
+async def chat_stream_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+    logging.info(f"接收到串流聊天請求：'{request.message}', Session ID: {request.session_id}")
+
+    if model is None:
+        logging.error("串流請求：AI 模型未初始化。")
+        raise HTTPException(status_code=503, detail="AI 服務未初始化 (模型)")
+
+    current_session_id = request.session_id
+    if not current_session_id:
+        current_session_id = str(uuid.uuid4())
+        logging.info(f"串流請求：未提供 Session ID，已生成新的 Session ID：{current_session_id}")
+
+    # 1. 保存使用者訊息到資料庫
+    try:
+        user_message_db = Message(session_id=current_session_id, sender="user", text=request.message)
+        db.add(user_message_db)
+        db.commit()
+        db.refresh(user_message_db)
+        logging.info(f"串流請求：使用者訊息已保存 (Session ID: {current_session_id})")
+    except Exception as e_db_user:
+        logging.error(f"串流請求：保存使用者訊息失敗: {e_db_user}", exc_info=True)
+        raise HTTPException(status_code=500, detail="伺服器內部錯誤，無法保存使用者訊息。")
+
+    async def event_generator():
+        full_ai_response_chunks = []
+        ai_response_saved = False # 標記 AI 回應是否已嘗試儲存
+        try:
+            async for chunk in get_ai_response_stream(
+                user_input=request.message,
+                model=model, # 全局 model
+                vectorstore=vectorstore, # 全局 vectorstore
+                search_api_key=SEARCH_API_KEY,
+                search_engine_id=SEARCH_ENGINE_ID
+            ):
+                if chunk: # 確保 chunk 不是空的
+                    # 為 SSE 格式化數據: data: {json_payload}\n\n
+                    # 我們傳送 JSON 物件，方便前端處理，例如 {"text": "片段內容"}
+                    # 或者 {"event": "error", "data": "錯誤訊息"}
+                    # 或者 {"event": "end", "data": "串流結束"}
+                    payload = {"text": chunk}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    full_ai_response_chunks.append(chunk)
+            
+            # 串流正常結束後，發送一個結束事件 (可選，但對前端有益)
+            yield f"event: end\ndata: Stream ended\n\n"
+
+        except Exception as e_stream_gen:
+            logging.error(f"串流生成過程中發生錯誤 (Session ID: {current_session_id}): {e_stream_gen}", exc_info=True)
+            error_payload = json.dumps({"error": "串流內容生成時發生錯誤。", "detail": str(e_stream_gen)})
+            yield f"event: error\ndata: {error_payload}\n\n" # 發送錯誤事件
+        finally:
+            # 2. 將完整的 AI 回應儲存到資料庫
+            if full_ai_response_chunks:
+                complete_ai_response = "".join(full_ai_response_chunks)
+                # 避免儲存僅包含錯誤提示或非常短的無意義回應
+                if complete_ai_response.strip() and \
+                   not complete_ai_response.startswith("抱歉，") and \
+                   not complete_ai_response.startswith("錯誤：") and \
+                   len(complete_ai_response.strip()) > 10: # 隨意設定一個最小長度
+                    try:
+                        ai_message_db = Message(session_id=current_session_id, sender="ai", text=complete_ai_response)
+                        db.add(ai_message_db)
+                        db.commit()
+                        db.refresh(ai_message_db)
+                        logging.info(f"串流請求：完整 AI 回應已保存 (Session ID: {current_session_id})")
+                        ai_response_saved = True
+                    except Exception as e_db_ai:
+                        logging.error(f"串流請求：保存 AI 回應失敗: {e_db_ai}", exc_info=True)
+            
+            if not ai_response_saved and not full_ai_response_chunks:
+                 logging.info(f"串流請求：未收集到 AI 回應片段，無內容保存 (Session ID: {current_session_id})")
+            elif not ai_response_saved and full_ai_response_chunks: # 有片段但未保存 (例如是錯誤訊息)
+                 logging.info(f"串流請求：AI 回應為空或錯誤，未保存 (Session ID: {current_session_id})")
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 # --- 背景任務處理函式 ---
 def process_document_in_background(temp_file_path: str, original_filename: str):

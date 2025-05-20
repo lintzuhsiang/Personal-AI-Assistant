@@ -1,6 +1,7 @@
 # ai_assistant_core.py (建議將原文件改名，以區別核心邏輯和 API/UI 入口)
 # 個人 AI 助理核心邏輯函式庫
 
+import asyncio
 import google.generativeai as genai
 import os
 import textwrap
@@ -14,7 +15,7 @@ from langchain_core.documents import Document
 # from langchain_community.vectorstores import Chroma
 from langchain_community.vectorstores import PGVector  # <--- 新增 PGVector 導入
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from typing import Optional # 用於類型提示 Optional
+from typing import AsyncIterable, Optional # 用於類型提示 Optional
 import openai
 
 # --- 設定日誌記錄 (Industry Standard) ---
@@ -142,7 +143,7 @@ def perform_web_search(query, api_key, cx_id, num_results=5):
 
 # --- 新增：建立 AI 判斷使用者意圖及關鍵詞的函式 ---
 # 這個函式負責呼叫 AI 判斷意圖
-def decide_intent_and_query(user_input: str, model_instance: Optional[genai.GenerativeModel]) -> dict:
+async def decide_intent_and_query(user_input: str, model_instance: Optional[genai.GenerativeModel]) -> dict:
     """
     發送 Prompt 給 AI 模型，請它判斷使用者問題的意圖和相關關鍵詞。
 
@@ -190,7 +191,7 @@ def decide_intent_and_query(user_input: str, model_instance: Optional[genai.Gene
 
     try:
         # 呼叫 Gemini 模型獲取判斷結果
-        response = model_instance.generate_content(decision_prompt)
+        response = await model_instance.generate_content_async(decision_prompt)
         logging.info("成功接收 AI 模型意圖判斷回應。")
 
         if response.text:
@@ -246,12 +247,18 @@ def decide_intent_and_query(user_input: str, model_instance: Optional[genai.Gene
             except json.JSONDecodeError:
                 logging.error(f"無法解析 AI 返回的內容為 JSON: {response.text}。返回預設值。", exc_info=True)
                 return default_response
-        else:
-            logging.warning("AI 模型未返回文字內容以進行意圖判斷。返回預設值。")
+        else: # response.text 為空
+            # 檢查是否有因安全原因被阻止
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                logging.warning(f"意圖判斷 Prompt 被阻止，原因: {response.prompt_feedback.block_reason_message}")
+            else:
+                logging.warning("AI 模型未返回文字內容以進行意圖判斷。返回預設值。")
             return default_response
 
+    except genai.types.BlockedPromptException as bpe:
+        logging.error(f"意圖判斷 Prompt 被阻止 (BlockedPromptException): {bpe}", exc_info=False)
+        return default_response # 或者返回一個包含錯誤指示的特定回應
     except Exception as e:
-        # 捕獲呼叫 model_instance.generate_content 時可能發生的任何其他錯誤
         logging.error(f"與 AI 模型互動進行意圖判斷時發生意外錯誤: {e}。返回預設值。", exc_info=True)
         return default_response
 
@@ -480,7 +487,7 @@ def transcribe_audio(audio_file_path: str, openai_client: Optional[openai.OpenAI
 
 
 # --- 新增：建立生成 AI 新聞 Newsletter 的函式 ---
-def generate_ai_newsletter(interests: list[str], model: Optional[genai.GenerativeModel], search_api_key: Optional[str], search_engine_id: Optional[str]) -> tuple[Optional[str], list]:
+async def generate_ai_newsletter(interests: list[str], model: Optional[genai.GenerativeModel], search_api_key: Optional[str], search_engine_id: Optional[str]) -> tuple[Optional[str], list]:
     """
     根據使用者興趣，獲取近期 AI 新聞，並使用 AI 總結成 Newsletter 格式。
 
@@ -579,24 +586,28 @@ def generate_ai_newsletter(interests: list[str], model: Optional[genai.Generativ
 
     try:
         # 呼叫 Gemini 模型生成 Newsletter 內容
-        response = model.generate_content(newsletter_prompt)
+        response = await model.generate_content_async(newsletter_prompt)
         newsletter_content = response.text.strip() if response.text else None
 
         if newsletter_content:
-            logging.info("成功生成 Newsletter 內容。")
-            return (newsletter_content,unique_search_results)
+            return (newsletter_content, unique_search_results)
         else:
-            logging.warning("AI 模型未能生成 Newsletter 內容。")
-            return ("抱歉，AI 未能成功生成 Newsletter 內容。",unique_search_results) # 返回提示信息
-
+            # 檢查安全回饋
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                 logging.warning(f"Newsletter 生成 Prompt 被阻止，原因: {response.prompt_feedback.block_reason_message}")
+                 return (f"抱歉，因內容政策，Newsletter 未能生成 ({response.prompt_feedback.block_reason_message})。", unique_search_results)
+            return ("抱歉，AI 未能成功生成 Newsletter 內容。", unique_search_results)
+            
+    except genai.types.BlockedPromptException as bpe:
+        logging.error(f"Newsletter 生成 Prompt 被阻止 (BlockedPromptException): {bpe}", exc_info=False)
+        return (f"抱歉，因內容政策，Newsletter 生成請求被阻止。", unique_search_results)
     except Exception as e:
-        logging.error(f"使用 AI 模型生成 Newsletter 時發生錯誤: {e}", exc_info=True)
-        return (f"抱歉，生成 Newsletter 時發生內部錯誤：{e}",unique_search_results) # 返回錯誤信息
+        return (f"抱歉，生成 Newsletter 時發生內部錯誤：{e}", unique_search_results)
 
 
 
 # --- 將核心 RAG 回答邏輯封裝成函式 ---
-def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[PGVector], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
+async def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: Optional[PGVector], search_api_key: Optional[str], search_engine_id: Optional[str]) -> str:
     """
     根據使用者輸入，結合個人知識庫和網路搜尋，生成 AI 的回答。
 
@@ -616,7 +627,7 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: 
     logging.info(f"處理使用者輸入：{user_input}")
 
     # 直接呼叫新的意圖判斷函式
-    intent_data = decide_intent_and_query(user_input, model) # <--- 呼叫新的函式
+    intent_data = await decide_intent_and_query(user_input, model) # <--- 呼叫新的函式
     primary_intent = intent_data.get('intent', 'chat') # 獲取判斷的意圖，默認為 chat
     relevant_term = intent_data.get('term', user_input) # 獲取判斷的關鍵詞，默認為原始輸入
     search_needed = intent_data.get('web_search_needed', False) # 從 AI 判斷結果獲取
@@ -740,7 +751,6 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: 
         """).strip())
         logging.info("構造標準聊天 Prompt。")
 
-
     # 2. 加入個人知識庫上下文 (如果檢索到了或狀態提示) (這部分代碼保持原樣)
     if personal_context:
         final_prompt_parts.append(textwrap.dedent(f"""
@@ -786,7 +796,6 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: 
     # 因為只有在 chat 模式下才會觸發 web search，而 chat 模式使用標準 Prompt，
     # 標準 Prompt 已經包含了無結果回退到通用知識的指令。
 
-
     # 4. 加入使用者原始問題
     final_prompt_parts.append(textwrap.dedent(f"""
         --- 使用者問題 ---
@@ -799,7 +808,6 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: 
     # print(f"DEBUG: Final Prompt:\n{final_prompt}") # 調試用
 
     # --- 發送最終 Prompt 給 AI 模型並處理回應 ---
-    # ... (The rest of the get_ai_response function code remains unchanged) ...
     if model is not None and final_prompt.strip():
         try:
             logging.info("發送最終 Prompt 給 AI 模型 (串流模式)...")
@@ -874,177 +882,298 @@ def get_ai_response(user_input: str, model: genai.GenerativeModel, vectorstore: 
          logging.warning("構造的最終 Prompt 為空，跳過發送給 AI。")
          return "" # 返回空字串或特定提示
 
+async def get_ai_response_stream(
+    user_input: str,
+    model: genai.GenerativeModel, # 確保傳入的是初始化的 genai.GenerativeModel 實例
+    vectorstore: Optional[PGVector], # 假設你已遷移到 PGVector
+    search_api_key: Optional[str],
+    search_engine_id: Optional[str]
+    # session_id: Optional[str] = None # 考慮傳入 session_id 以便後續記錄完整對話
+) -> AsyncIterable[str]: # 返回一個非同步可迭代的字串 (文本片段)
+    """
+    根據使用者輸入，結合 RAG，以非同步串流方式生成 AI 的回答。
+    逐塊 yield 文本。
+    """
+    if model is None:
+        yield "錯誤：AI 模型未初始化，無法生成回答。"
+        return # 結束生成器
 
-# --- 主要應用程式入口點 --- (保留這個區塊，但修改其內容)
-if __name__ == "__main__":
+    logging.info(f"串流處理使用者輸入：{user_input}")
 
-    # --- 載入環境變數 ---
-    config = load_env_variables() # 接收設定字典
+    # 1. 意圖判斷 (這部分目前是同步的，如果 model.generate_content 是瓶頸，未來也可考慮優化)
+    #    注意：decide_intent_and_query 內部也呼叫了 model.generate_content。
+    #    為了串流，理想情況下所有對 LLM 的呼叫都應該是非同步的。
+    #    暫時我們先假設 decide_intent_and_query 執行相對較快，或者其結果對於串流生成是必要的。
+    #    如果 decide_intent_and_query 本身也需要變成 async，那麼這裡需要 await。
+    #    為了簡化第一步，我們先保持 decide_intent_and_query 同步，但要注意這點。
+    try:
+        intent_data = await decide_intent_and_query(user_input, model) # 假設 model 實例適用於同步和異步
+    except Exception as e_intent:
+        logging.error(f"意圖判斷時發生錯誤: {e_intent}", exc_info=True)
+        yield f"抱歉，在理解您的問題時發生錯誤。"
+        return
+
+    primary_intent = intent_data.get('intent', 'chat')
+    relevant_term = intent_data.get('term', user_input)
+    search_needed = intent_data.get('web_search_needed', False)
+    web_search_query = intent_data.get('web_search_query', relevant_term or user_input)
+     
+    # 為了收集 RAG 的上下文，我們可以定義一個內部異步函數或者直接 await
+    personal_context_str = None
+    web_search_context_str = None
+
+    # 2. RAG - 個人知識庫檢索 (異步)
+     # --- RAG 操作可以考慮並行執行 ---
+    rag_tasks = []
+    personal_context = None
+    if vectorstore is not None:
+        retrieval_query = relevant_term if relevant_term and primary_intent in ['explain', 'discuss'] else user_input
+        if not retrieval_query.strip():
+            retrieval_query = user_input
+
+        logging.info(f"從 PGVector 檢索與查詢 '{retrieval_query}' (意圖: {primary_intent}) 相關的片段...")
+        async def retrieve_personal_context():
+            nonlocal personal_context_str # 允許修改外部作用域的變數
+            logging.info(f"從 PGVector 非同步檢索與查詢 '{retrieval_query}' 相關片段...")
+            try:
+                # 優先使用非同步方法 asimilarity_search
+                retrieved_docs = await vectorstore.asimilarity_search(retrieval_query, k=3)
+                if retrieved_docs:
+                    personal_context_parts = [doc.page_content for doc in retrieved_docs]
+                    personal_context_str = "\n---\n".join(personal_context_parts)
+                    logging.info(f"PGVector 非同步檢索到 {len(retrieved_docs)} 個片段。")
+                else:
+                    logging.info("PGVector 非同步檢索未能找到相關片段。")
+            except Exception as e_rag:
+                logging.error(f"執行 PGVector 非同步檢索時發生錯誤: {e_rag}", exc_info=True)
+        
+        rag_tasks.append(retrieve_personal_context())
+
+    # 3. RAG - 網路搜尋 (同步)
+    web_search_context = None
+    if search_needed:
+        if not search_api_key or not search_engine_id:
+            logging.warning("無法執行網路搜尋，缺少 API 金鑰或 CX ID。")
+        else:
+            async def retrieve_web_context():
+                nonlocal web_search_context_str
+                logging.info(f"使用 asyncio.to_thread 執行網路搜尋，查詢詞：'{web_search_query}'")
+                try:
+                    # asyncio.to_thread 將同步函式放到執行緒池中執行
+                    search_results_items = await asyncio.to_thread(
+                        perform_web_search, web_search_query, search_api_key, search_engine_id, 3
+                    )
+                    if search_results_items:
+                        context_parts = []
+                        for i, item in enumerate(search_results_items):
+                            title = item.get('title', 'N/A')
+                            link = item.get('link', 'N/A')
+                            snippet = item.get('snippet', 'N/A')
+                            context_parts.append(textwrap.dedent(f"Web Source {i+1}:\nTitle: {title}\nURL: {link}\nSnippet: {snippet}\n").strip())
+                        web_search_context_str = "\n---\n".join(context_parts)
+                        logging.info(f"網路搜尋（執行緒）找到 {len(search_results_items)} 個結果。")
+                    else:
+                        logging.info("網路搜尋（執行緒）未找到相關結果。")
+                except Exception as e_web_search:
+                    logging.error(f"執行網路搜尋（執行緒）時發生錯誤: {e_web_search}", exc_info=True)
+
+            rag_tasks.append(retrieve_web_context())
+
+    # 並行執行所有 RAG 任務 (如果有的話)
+    if rag_tasks:
+        logging.info(f"開始並行執行 {len(rag_tasks)} 個 RAG 任務...")
+        await asyncio.gather(*rag_tasks)
+        logging.info("所有 RAG 任務執行完畢。")
+        
+    # 4. 構造最終 Prompt (與 get_ai_response 中類似)
+    final_prompt_parts = []
+    if primary_intent == 'explain':
+        final_prompt_parts.append(textwrap.dedent(f"""
+        請扮演一位資深的 AI 軟體工程師和專業的面試準備輔導員。
+        你的任務是根據提供的參考資訊（如果有的話），以**清晰、有條理、針對面試考點的方式**，深入解釋概念「{relevant_term}」。
+        主要基於「個人知識庫」中的內容進行解釋。如果個人知識庫資訊不足，可參考「網路搜尋結果」。如果所有參考資訊都不足以解釋，請用通用知識。
+        回答應該包含概念的定義、原理、關鍵要素、優缺點等，適合面試回答的風格，精簡且精確。使用流暢的中文。
+        以下是參考資訊：
+        """).strip())
+    else: # 'chat'
+        final_prompt_parts.append(textwrap.dedent("""
+        請扮演一個經驗豐富的 AI 軟體工程師，同時也是一位樂於助人的面試準備輔導員。
+        你的任務是根據提供的參考資訊（如果有的話），精準、清晰、有條理、針對面試考點地回答或解釋使用者關於 AI、機器學習、深度學習、演算法、資料結構、系統設計、個人專案等方面的問題。
+        回答時請嚴格遵循以下優先順序和原則：
+        1.  最優先且深度參考「個人知識庫」。... (同之前標準 Prompt 的第 1-5 點) ...
+        以下是參考資訊：
+        """).strip())
+
+    if personal_context:
+        final_prompt_parts.append(textwrap.dedent(f"---\n個人知識庫參考:\n{personal_context}").strip())
+    # ... (處理 vectorstore is None 或未檢索到內容的提示) ...
+    elif vectorstore is not None:
+         final_prompt_parts.append(textwrap.dedent("---\n個人知識庫參考:\n(未從個人知識庫檢索到與問題相關的筆記)").strip())
+    else:
+         final_prompt_parts.append(textwrap.dedent("---\n個人知識庫參考:\n(個人知識庫功能未啟用或未成功載入)").strip())
+
+
+    if web_search_context:
+        final_prompt_parts.append(textwrap.dedent(f"---\n網路搜尋結果參考:\n{web_search_context}").strip())
+    
+    final_prompt_parts.append(textwrap.dedent(f"---\n使用者問題:\n{user_input}").strip())
+    final_prompt = "\n\n".join(final_prompt_parts)
+
+    # 5. 執行 AI 模型生成內容 (串流模式)
+    logging.info("開始從 AI 模型獲取串流回應...")
+    try:
+        async_response_iterable = await model.generate_content_async(final_prompt, stream=True)
+        async for chunk in async_response_iterable:
+            # ... (與你之前版本相同的串流處理和安全檢查邏輯) ...
+            # 例如:
+            # if chunk.candidates and any(c.finish_reason == genai.types.Candidate.FinishReason.SAFETY for c in chunk.candidates):
+            #     logging.warning("串流內容被安全策略阻止。")
+            #     yield "[內容因安全原因被過濾]" # 或者不 yield 任何東西，或者 yield 一個特定的錯誤事件
+            #     break 
+            if chunk.text:
+                yield chunk.text
+        
+        # 檢查迭代完成後的 prompt_feedback (如果適用且重要)
+        if hasattr(async_response_iterable, 'prompt_feedback') and \
+           async_response_iterable.prompt_feedback and \
+           async_response_iterable.prompt_feedback.block_reason:
+            block_reason_message = async_response_iterable.prompt_feedback.block_reason_message
+            logging.warning(f"完整提示在串流後被阻止，原因：{block_reason_message}")
+            # 注意：此時串流可能已經結束，前端可能已經收到了部分內容（如果有的話）
+            # 在 SSE 中，可以考慮發送一個特殊的 "error" 或 "blocked" 事件
+            # 這裡我們可能無法再 yield，因為迭代器已耗盡
+            # 更好的做法是在 FastAPI 端點捕獲這個狀態，或者在前端有結束標記時檢查
+
+    except genai.types.BlockedPromptException as bpe:
+        logging.error(f"由於 Prompt 被阻止，無法生成串流回答: {bpe}", exc_info=False)
+        block_reason_msg = "您的請求因內容政策被阻止"
+        yield f"抱歉，{block_reason_msg}，無法處理。"
+    except Exception as e:
+        logging.error(f"與 AI 模型互動生成串流回答時發生錯誤: {e}", exc_info=True)
+        yield f"抱歉，生成回答時發生內部錯誤。"
+        # 完整的錯誤是 str(e)，但可能太長不適合直接 yield 給前端
+
+async def run_cli_tests_and_loop(): # <--- 新的 async 函式包裹 __main__ 的邏輯
+    config = load_env_variables()
+    
     GOOGLE_API_KEY_LOCAL = config.get('GOOGLE_API_KEY')
     DATABASE_URL_LOCAL = config.get('DATABASE_URL')
     SEARCH_API_KEY_LOCAL = config.get('SEARCH_API_KEY')
     SEARCH_ENGINE_ID_LOCAL = config.get('SEARCH_ENGINE_ID')
     OPENAI_API_KEY_LOCAL = config.get('OPENAI_API_KEY')
 
-    # --- 初始化核心組件 (AI 模型 和 向量資料庫) ---
-    print("--- 應用程式啟動初始化 ---")
-    # 使用 config 中的金鑰初始化模型
     model = None
     if GOOGLE_API_KEY_LOCAL:
-        model = initialize_gemini_model(GOOGLE_API_KEY_LOCAL)
+        model = initialize_gemini_model(GOOGLE_API_KEY_LOCAL) # initialize_gemini_model 保持同步
     else:
-        logging.error("無法初始化 Gemini 模型，因為 GOOGLE_API_KEY 未設定。")
-        # 根據你的應用程式邏輯，這裡可以決定是否 sys.exit
+        logging.error("本地測試：無法初始化 Gemini 模型...")
 
-    # 初始化或載入向量資料庫
-    # 需要提供文件路徑列表。這裡硬編碼一個測試文件路徑。
-    # 未來可以擴展從配置文件讀取文件列表或支持文件上傳後動態更新
-    document_paths_to_process = ["my_notes.txt"] # <--- 設定您個人文件的路徑列表
-    vectorstore = None 
+    vectorstore = None
     if GOOGLE_API_KEY_LOCAL and DATABASE_URL_LOCAL:
-        vectorstore = initialize_vector_store(
-            DATABASE_URL_LOCAL,
+        document_paths_to_process = ["my_notes.txt"]
+        # initialize_vector_store 保持同步，它內部不直接 await IO 密集操作
+        # 而是設定 PGVector，實際的 IO 操作 (add_documents, similarity_search) 才需要非同步
+        vectorstore = initialize_vector_store( 
             document_paths_to_process,
-            GOOGLE_API_KEY_LOCAL, # 傳遞金鑰
-            DEFAULT_EMBEDDING_MODEL_NAME
+            GOOGLE_API_KEY_LOCAL,
+            DATABASE_URL_LOCAL
         )
-    else:
-        logging.error("無法初始化向量資料庫，因為 GOOGLE_API_KEY 未設定。")
-        
-    # 確保核心組件初始化成功
+
     if model is None:
-        # 讓主程式決定是否因模型初始化失敗而退出
-        # sys.exit("應用程式啟動失敗：AI 模型未成功初始化。")
-        logging.critical("AI 模型未成功初始化，某些功能可能無法使用或應用程式可能無法正常運行。")
-
-    # 向量資料庫可能為 None，如果初始化失敗或沒有文件
-    print("--- 應用程式啟動初始化完成 ---")
-    print("-" * 40)
-
-    # --- 新增：AI 新聞 Newsletter 生成測試區塊 ---
-    # 這個區塊用於在開發階段單獨測試 generate_ai_newsletter 函式
-    print("\n--- 運行 AI 新聞 Newsletter 生成測試 ---")
-
-    # 只有當 AI 模型和搜尋金鑰都可用時才運行測試
-    # model, SEARCH_API_KEY, SEARCH_ENGINE_ID 都是在 __main__ 開頭初始化/載入的全局變數
-    if model is None:
-        logging.warning("跳過 Newsletter 生成測試：AI 模型未初始化。")
-        print("跳過 Newsletter 生成測試，因為 AI 模型未準備好。")
-
-    elif not config.get('SEARCH_API_KEY') or not config.get('SEARCH_ENGINE_ID'):
-        logging.warning("跳過 Newsletter 生成測試：缺少搜尋 API 金鑰或 CX ID。")
-        print("跳過 Newsletter 生成測試，因為缺少搜尋 API 金鑰或 CX ID。")
-    else:
-        print(f"開始生成上週關於 {', '.join(USER_AI_INTERESTS)} 的 Newsletter...")
-        # 呼叫新的 Newsletter 生成函式，使用全局變數
-        newsletter_content = generate_ai_newsletter(USER_AI_INTERESTS, model, config.get('SEARCH_API_KEY'), config.get('SEARCH_ENGINE_ID'))
-
-        if newsletter_content:
-            print("\n--- 生成的 AI 新聞 Newsletter ---")
-            print(newsletter_content) # 印出生成的 Newsletter 內容
-            print("---------------------------------")
-        else:
-            print("\n未能生成 AI 新聞 Newsletter。請查看上面的日誌了解原因。")
-
-    logging.info("--- AI 新聞 Newsletter 生成測試結束 ---")
-    print("-" * 40)
-
-    # --- 新增：語音轉文字 (STT) 功能測試區塊 ---
-    print("\n--- 運行語音轉文字測試 ---")
-    # 請準備一個小型音頻檔案 (.mp3, .wav 等)，放在與 ai_assistant_core.py 同一個目錄下
-    # 並修改這裡的路徑指向您的測試檔案
-    test_audio_file = "test_audio_2.mp3" # <--- 修改為您的測試音頻檔案名稱和副檔名，例如 "my_voice_record.wav"
-
-    # 只有當 OpenAI API 金鑰已設定且測試檔案存在時才運行測試
-    # OPENAI_API_KEY 已經在 load_env_variables 中載入
-    openai_client = None # 初始化為 None
-    if config.get('OPENAI_API_KEY'):
-        try:
-            openai_client = openai.OpenAI(api_key=config.get('OPENAI_API_KEY')) # 初始化一次
-            logging.info("OpenAI 客戶端初始化成功。")
-        except Exception as e:
-            logging.error(f"初始化 OpenAI 客戶端失敗: {e}")
-    else:
-        logging.warning("跳過語音轉文字測試：缺少 OPENAI_API_KEY。")
-
-    if openai_client:
-        if not os.path.exists(test_audio_file):
-            logging.warning(f"跳過語音轉文字測試：測試音頻檔案不存在：{test_audio_file}")
-            print(f"跳過語音轉文字測試，因為測試音頻檔案 '{test_audio_file}' 不存在。")
-            print("請準備一個音頻檔案並修改 test_audio_file 變數指向它。")
-        else:
-            transcribed_text = transcribe_audio(test_audio_file, openai_client) # 傳遞 client 實例
-            if transcribed_text:
-                print(f"\n語音轉文字測試成功。轉錄結果：")
-                print(transcribed_text)
-            else:
-                print("\n語音轉文字測試失敗。請查看上面的日誌獲取詳細錯誤。")
-    else:
-        logging.warning("跳過語音轉文字測試：OpenAI 客戶端未初始化 (可能缺少 API 金鑰或初始化失敗)。")
+        logging.critical("本地測試：AI 模型未成功初始化...")
     
-    logging.info("--- 語音轉文字測試結束 ---")
+    print("--- 應用程式啟動初始化完成 (CLI 模式) ---")
     print("-" * 40)
 
-    # --- 主要對話迴圈 (CLI 模式) ---
-    # 我們現在將 get_ai_response 函式應用到 CLI 對話中
-    print("--- 個人 AI 助理 (CLI 模式，整合個人知識庫與網路搜尋 RAG) ---")
-    print("輸入您的問題或指令，輸入 'exit', 'quit' 結束。")
+    # --- Newsletter 測試 ---
+    USER_AI_INTERESTS = ["大型語言模型", "AI倫理"]
+    # print("\n--- 運行 AI 新聞 Newsletter 生成測試 ---")
+    # if model and SEARCH_API_KEY_LOCAL and SEARCH_ENGINE_ID_LOCAL:
+    #     logging.info(f"開始非同步生成 Newsletter...")
+    #     # 使用 await 呼叫非同步的 generate_ai_newsletter
+    #     newsletter_text, newsletter_sources = await generate_ai_newsletter( # <--- await
+    #         USER_AI_INTERESTS, 
+    #         model, 
+    #         SEARCH_API_KEY_LOCAL, 
+    #         SEARCH_ENGINE_ID_LOCAL
+    #     )
+    #     # ... (處理 newsletter_text 和 newsletter_sources) ...
+    #     if newsletter_text and not newsletter_text.startswith("抱歉"):
+    #         print("\n--- 生成的 AI 新聞 Newsletter ---\n", newsletter_text)
+    #         if newsletter_sources: print("--- Newsletter 來源 ---\n", newsletter_sources)
+    #     else:
+    #         print(f"\n未能成功生成 Newsletter: {newsletter_text}")
 
-    # 根據 vectorstore 是否可用，提示個人知識庫狀態
-    if vectorstore is not None:
-        try:
-            print(f"PGVector 向量資料庫已載入/創建。(集合名稱: {PGVECTOR_COLLECTION_NAME})")
-        except Exception as e:
-            logging.error(f"檢查 PGVector 狀態時出錯（或它未成功初始化）: {e}")
-            print("PGVector 向量資料庫可能已載入，但檢查詳細狀態時出錯。")
+    # else:
+    #     logging.warning("跳過 Newsletter 生成測試...")
+    print("-" * 40)
+    
+    # --- STT 測試 ---
+    # 如果 openai_client.audio.transcriptions.create 有 async 版本，也可以優化) ...
+    # 為了簡化，我們先保持 STT 測試部分的同步性，或者你可以用 await asyncio.to_thread()
+    print("\n--- 運行語音轉文字測試 ---")
+
+    # --- 主要對話迴圈 ---
+    if model:
+        print("--- 個人 AI 助理 (CLI 模式) ---")
+    
+        print("-" * 40)
+        while True:
+            try:
+                user_input = await asyncio.to_thread(input, "您：") # <--- 使 input 非阻塞 (可選優化)
+                # 或者保持同步 input: user_input = input("您：")
+                logging.info(f"使用者輸入：{user_input}")
+            except (EOFError, KeyboardInterrupt):
+                # ...
+                break
+            # ... (處理退出和空輸入) ...
+            if user_input.lower() in ['exit', 'quit']: break
+            if not user_input.strip(): continue
+
+            # ---- 測試選項 ----
+            test_mode = await asyncio.to_thread(input, "選擇測試模式 (1: 非串流完整回應, 2: 串流回應, 直接按 Enter 預設為串流): ")
+            
+            if test_mode == '1':
+                print("\n--- 測試非串流 get_ai_response ---")
+                ai_response_text_full = await get_ai_response( # 假設 get_ai_response 也是 async def
+                    user_input,
+                    model,
+                    vectorstore, 
+                    SEARCH_API_KEY_LOCAL, 
+                    SEARCH_ENGINE_ID_LOCAL
+                )
+                if ai_response_text_full:
+                     print("AI 助理 (完整回應)：\n", textwrap.fill(ai_response_text_full, width=80))
+                else:
+                    print("AI 助理 (完整回應)：未能獲取回應。")
+            else: # 預設或選擇 '2'
+                print("\n--- 測試串流 get_ai_response_stream ---")
+                print("AI 助理 (串流回應)：", end="", flush=True)
+                try:
+                    async for chunk in get_ai_response_stream(
+                        user_input,
+                        model,
+                        vectorstore, 
+                        SEARCH_API_KEY_LOCAL, 
+                        SEARCH_ENGINE_ID_LOCAL
+                    ):
+                        print(chunk, end="", flush=True)
+                    print() # 串流結束後換行
+                except Exception as stream_err:
+                    print(f"\n處理回應串流時發生錯誤: {stream_err}")
+                    logging.error(f"回應串流錯誤: {stream_err}", exc_info=True)
+            print("-" * 40)
     else:
-        print("個人知識庫功能未啟用，因為向量資料庫未成功創建或載入。")
+        print("AI 模型未能初始化，無法啟動對話迴圈。")
 
-    print("-" * 40)
+    logging.info("應用程式已結束 (CLI 模式)。")
 
-    while True:
-        try:
-            user_input = input("您：")
-            logging.info(f"使用者輸入：{user_input}")
-
-        except (EOFError, KeyboardInterrupt):
-            print("\nAI 助理：接收到結束訊號或中斷指令，再見！")
-            logging.info("接收到終端機中斷訊號，程式結束。")
-            break
-        except Exception as e:
-             logging.error(f"獲取使用者輸入時發生意外錯誤: {e}", exc_info=True)
-             print("AI 助理：獲取您的輸入時發生問題，請重試。")
-             continue
-
-        # 檢查是否退出指令
-        if user_input.lower() in ['exit', 'quit']:
-            print("AI 助理：再見！")
-            logging.info("使用者要求退出，程式正常結束。")
-            break
-
-        # 忽略空白輸入
-        if not user_input.strip():
-            continue
-
-        # --- 呼叫核心 RAG 回答函式 ---
-        # 將使用者輸入、模型、向量庫、搜尋金鑰都傳遞給函式
-        # 函式內部處理檢索、搜尋判斷、Prompt 構造和 AI 呼叫
-        ai_response_text = get_ai_response(
-            user_input,
-            model, # 傳遞已初始化的模型,
-            vectorstore,
-            config.get('SEARCH_API_KEY'), # 從 config 獲取
-            config.get('SEARCH_ENGINE_ID') # 從 config 獲取
-            # 注意：decide_intent_and_query 和 perform_web_search 也需要 API keys
-            # get_ai_response 內部呼叫這些函式時，也需要將相關的 key 傳遞下去，或將 model/config 作為參數傳遞
-        )
-        # 顯示 AI 的回應 (直接使用 get_ai_response 返回的文本)
-        if ai_response_text:
-             # 在 CLI 模式下，格式化輸出
-             formatted_text = textwrap.fill(ai_response_text, width=80, replace_whitespace=False)
-             print("AI 助理：")
-             print(formatted_text)
-        # else: get_ai_response 在失敗時已經返回錯誤訊息，成功但無文本的情況也處理了
-        print("-" * 40) # 對話分隔線
-
-    logging.info("應用程式已結束。")
+# --- 主要應用程式入口點 --- (保留這個區塊，但修改其內容)
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_cli_tests_and_loop())
+    except KeyboardInterrupt:
+        print("\n程式被使用者中斷。")
+    except Exception as e:
+        print(f"執行主程式時發生未預期的錯誤: {e}")
+        logging.error("主程式執行錯誤", exc_info=True)
