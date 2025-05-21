@@ -1,6 +1,5 @@
 # ai_assistant_core.py (建議將原文件改名，以區別核心邏輯和 API/UI 入口)
 # 個人 AI 助理核心邏輯函式庫
-
 import asyncio
 import google.generativeai as genai
 import os
@@ -397,15 +396,13 @@ def initialize_vector_store(db_connection_string: str, document_paths: list[str]
 
 
 # --- 建立處理單一文件並加入現有向量資料庫的函式 ---
-def process_and_add_to_vector_store(file_path: str, vectorstore: PGVector) -> bool:
+def process_and_add_to_vector_store(file_path: str, vectorstore: PGVector, session_id: str) -> bool:
     """
     載入、分割指定文件，並將其內容添加到現有的向量資料庫中。
 
     Args:
         file_path (str): 需要處理的文件的完整路徑。
         vectorstore (Chroma): 已初始化好的 Chroma 向量資料庫實例。
-        embedding_model_name (str): 用於生成嵌入的模型名稱。
-        google_api_key (str): Google API 金鑰，用於嵌入模型。
 
     Returns:
         bool: 如果成功處理並添加到資料庫，返回 True，否則返回 False。
@@ -418,22 +415,40 @@ def process_and_add_to_vector_store(file_path: str, vectorstore: PGVector) -> bo
         logging.error(f"文件不存在：{file_path}，無法添加。")
         return False
 
-    logging.info(f"開始處理文件 '{os.path.basename(file_path)}' 並添加到 PGVector...")
+    logging.info(f"開始處理文件 '{os.path.basename(file_path)}' (Session ID: {session_id}) 並添加到 PGVector...")
 
     try:
         document_chunks = load_and_chunk_document(file_path) # load_and_chunk_document 保持不變
 
         if not document_chunks:
-            logging.warning(f"文件 '{os.path.basename(file_path)}' 未能生成任何文件片段，跳過添加。")
+            logging.warning(f"文件 '{os.path.basename(file_path)}' (Session ID: {session_id}) 未能生成任何文件片段，跳過添加。")
             return False
+        document_chunks_with_metadata = []
+        for chunk in document_chunks:
+            # 確保 metadata 字典存在，如果不存在則創建一個新的
+            if chunk.metadata is None:
+                chunk.metadata = {}
+            
+            # 添加 session_id (如果 session_id 有效)
+            if session_id: # 你可以根據需要決定 session_id 是否總是必需的
+                chunk.metadata['session_id'] = session_id
+            
+            # 添加原始文件名作為來源 (非常推薦)
+            chunk.metadata['source_filename'] = os.path.basename(file_path)
+            
+            # 你還可以添加其他有用的元數據，例如上傳時間等
+            # from datetime import datetime, timezone
+            # chunk.metadata['upload_utc_timestamp'] = datetime.now(timezone.utc).isoformat()
+
+            document_chunks_with_metadata.append(chunk)
 
         logging.info(f"開始添加 {len(document_chunks)} 個文件片段到 PGVector...")
-        vectorstore.add_documents(documents=document_chunks) # 使用 PGVector 的 add_documents
-        logging.info(f"成功添加文件片段到 PGVector。PGVector 會自動處理持久化到 PostgreSQL。")
+        vectorstore.add_documents(documents=document_chunks_with_metadata) # 使用 PGVector 的 add_documents
+        logging.info(f"成功添加文件 '{os.path.basename(file_path)}' (Session ID: {session_id}) 的片段到 PGVector。")
         return True
 
     except Exception as e:
-        logging.error(f"處理文件 '{os.path.basename(file_path)}' 並添加到 PGVector 時發生錯誤: {e}", exc_info=True)
+        logging.error(f"處理文件 '{os.path.basename(file_path)}' (Session ID: {session_id}) 並添加到 PGVector 時發生錯誤: {e}", exc_info=True)
         return False
 
 
@@ -1061,7 +1076,7 @@ async def run_cli_tests_and_loop(): # <--- 新的 async 函式包裹 __main__ �
     SEARCH_API_KEY_LOCAL = config.get('SEARCH_API_KEY')
     SEARCH_ENGINE_ID_LOCAL = config.get('SEARCH_ENGINE_ID')
     OPENAI_API_KEY_LOCAL = config.get('OPENAI_API_KEY')
-
+    print('DATABASE_URL_LOCAL: ',DATABASE_URL_LOCAL)
     model = None
     if GOOGLE_API_KEY_LOCAL:
         model = initialize_gemini_model(GOOGLE_API_KEY_LOCAL) # initialize_gemini_model 保持同步
@@ -1073,10 +1088,14 @@ async def run_cli_tests_and_loop(): # <--- 新的 async 函式包裹 __main__ �
         document_paths_to_process = ["my_notes.txt"]
         # initialize_vector_store 保持同步，它內部不直接 await IO 密集操作
         # 而是設定 PGVector，實際的 IO 操作 (add_documents, similarity_search) 才需要非同步
+        # 在呼叫 initialize_vector_store 之前
+        print(f"DEBUG: DATABASE_URL_LOCAL is: {DATABASE_URL_LOCAL}, type: {type(DATABASE_URL_LOCAL)}")
+        print(f"DEBUG: document_paths_to_process is: {document_paths_to_process}, type: {type(document_paths_to_process)}")
+
         vectorstore = initialize_vector_store( 
+            DATABASE_URL_LOCAL,
             document_paths_to_process,
-            GOOGLE_API_KEY_LOCAL,
-            DATABASE_URL_LOCAL
+            GOOGLE_API_KEY_LOCAL
         )
 
     if model is None:

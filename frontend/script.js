@@ -85,7 +85,7 @@ async function loadChatHistory() {
     console.log("正在載入對話歷史..."); // 除錯信息，會在瀏覽器的 Developer Console 顯示
     try {
         // 向後端 /history 端點發送 GET 請求，包含 session_id 查詢參數
-        const response = await fetch(`${API_HISTORY_URL}?session_id=${CURRENT_SESSION_ID}`);
+        const response = await fetch(`${API_HISTORY_URL}?session_id=${currentSessionId}`);
 
         // 檢查 HTTP 狀態碼
         if (!response.ok) {
@@ -248,6 +248,14 @@ async function uploadDocument() {
     const formData = new FormData();
     formData.append('file', file);
 
+    if (currentSessionId) {
+        formData.append('session_id', currentSessionId);
+    } else {
+        // 如果前端也沒有 currentSessionId，可以傳一個空字串或不傳，讓後端生成
+        // 這裡我們假設如果前端有，就傳送
+         formData.append('session_id', ''); // 或者後端處理 Optional[str] = None
+    }
+    
     try {
         // 修改這裡使用新的 URL 常量
         const response = await fetch(API_UPLOAD_DOCUMENT_URL, { // <--- 使用 API_UPLOAD_DOCUMENT_URL
@@ -302,6 +310,13 @@ async function uploadAudioFile(audioFileBlob, originalFileName = 'recorded_audio
     const formData = new FormData();
     formData.append('audio_file', file); // 'audio_file' 必須與後端 Fast API 音頻處理端點函數參數名一致
 
+    if (currentSessionId) {
+        formData.append('session_id', currentSessionId);
+    } else {
+        // 如果前端也沒有 currentSessionId，可以傳一個空字串或不傳，讓後端生成
+        // 這裡我們假設如果前端有，就傳送
+         formData.append('session_id', ''); // 或者後端處理 Optional[str] = None
+    }
 
     try {
         const response = await fetch(API_UPLOAD_AUDIO_URL, {

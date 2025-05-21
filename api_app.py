@@ -1,26 +1,24 @@
 # 導入 FastAPI 相關模組
+import asyncio
 import uuid
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, Form, File, Depends
 from fastapi.responses import StreamingResponse # <--- 新增 StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware # 導入 CORS 中介層
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel # 用於定義請求和回應的資料模型
-import uvicorn # 用於運行 ASGI 服務器
+from datetime import datetime
 from typing import Annotated, Optional
 import tempfile
 import textwrap
 import shutil
-from datetime import datetime
-from fastapi.middleware.cors import CORSMiddleware # 導入 CORS 中介層
 import openai
-from fastapi.concurrency import run_in_threadpool
-from fastapi import BackgroundTasks, HTTPException
-from typing import List, Dict
+import uvicorn # 用於運行 ASGI 服務器
 # 導入資料庫模組和相關類別
 from database import engine, create_db_tables, get_db, Message, Newsletter, save_newsletter # 導入 engine 和模型創建函數等
 from sqlmodel import Session  # 導入 Session 類型用於依賴注入
 from sqlalchemy.orm import Session as SQLASession # 避免與 sqlmodel.Session 衝突，重命名
-import json
-# 導入 SQLAlchemy 的 desc 函式用於排序
 from sqlalchemy import desc # <--- 新增：導入 desc
+import json
 
 # 導入我們剛才重構的核心邏輯模組
 # 假設您已將原文件改名為 ai_assistant_core.py
@@ -163,9 +161,9 @@ async def startup_event():
     if GOOGLE_API_KEY and DATABASE_URL: # 確保金鑰和DB URL都存在
         global vectorstore # 聲明修改全局 vectorstore
         vectorstore = initialize_vector_store(
+            DATABASE_URL,
             document_paths_to_process, 
-            GOOGLE_API_KEY,
-            DATABASE_URL # 傳遞資料庫連接字串
+            GOOGLE_API_KEY
             # embedding_model_name 可以使用 initialize_vector_store 中的預設值
         )
     else:
@@ -225,18 +223,24 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     db.commit() # 提交 Session，將數據寫入資料庫
     db.refresh(user_message) # 刷新對象，獲取資料庫自動生成的 ID 和時間戳
 
-    # 呼叫核心邏輯函式來獲取 AI 的回答
-    # 將使用者輸入、模型、向量庫、搜尋金鑰都傳遞給函式
-    # 核心函式內部處理檢索、搜尋判斷、Prompt 構造和 AI 呼叫
-    # 注意：這裡需要將搜索 API 金鑰和 ID 傳遞給 get_ai_response
-    ai_response_text = await run_in_threadpool(
-        get_ai_response, # 要運行的同步函式
-        user_input=request.message, # 傳遞給函式的參數
-        model=model,
-        vectorstore=vectorstore,
-        search_api_key=SEARCH_API_KEY,
-        search_engine_id=SEARCH_ENGINE_ID
-    )
+    try: 
+        # 呼叫核心邏輯函式來獲取 AI 的回答
+        # 將使用者輸入、模型、向量庫、搜尋金鑰都傳遞給函式
+        # 核心函式內部處理檢索、搜尋判斷、Prompt 構造和 AI 呼叫
+        # 注意：這裡需要將搜索 API 金鑰和 ID 傳遞給 get_ai_response
+        ai_response_text = await get_ai_response(
+            user_input=request.message, # 傳遞給函式的參數
+            model=model,
+            vectorstore=vectorstore,
+            search_api_key=SEARCH_API_KEY,
+            search_engine_id=SEARCH_ENGINE_ID
+        )
+    except Exception as e_core_logic:
+        logging.error(f"核心邏輯 get_ai_response 執行錯誤: {e_core_logic}", exc_info=True)
+        # 即使核心邏輯出錯，也返回一個錯誤訊息給前端，並帶上 session_id
+        # 或者，如果錯誤是可預期的（例如 BlockedPromptException），get_ai_response 內部應處理並返回友好的錯誤字串
+        # 如果是意外錯誤，這裡可以返回一個通用的伺服器錯誤
+        raise HTTPException(status_code=500, detail=f"AI 助理生成回答時遇到問題: {str(e_core_logic)}")
 
     logging.info(f"生成 AI 回應：'{ai_response_text[:100]}...'") # 記錄回應前 100 字元
 
@@ -331,7 +335,7 @@ async def chat_stream_endpoint(request: ChatRequest, db: Session = Depends(get_d
 
 
 # --- 背景任務處理函式 ---
-def process_document_in_background(temp_file_path: str, original_filename: str):
+def process_document_in_background(temp_file_path: str, original_filename: str, session_id: Optional[str]):
     """
     在背景處理上傳的文件並將其添加到向量資料庫，然後清理臨時文件。
     """
@@ -350,8 +354,7 @@ def process_document_in_background(temp_file_path: str, original_filename: str):
         success = process_and_add_to_vector_store(
             temp_file_path,
             vectorstore,
-            DEFAULT_EMBEDDING_MODEL_NAME, # 使用定義好的常數
-            GOOGLE_API_KEY
+            session_id
         )
 
         if success:
@@ -375,13 +378,24 @@ def process_document_in_background(temp_file_path: str, original_filename: str):
 @app.post("/upload_document")
 async def upload_document(
     file: Annotated[UploadFile, File(...)],
-    background_tasks: BackgroundTasks # 添加 BackgroundTasks 依賴
+    background_tasks: BackgroundTasks, # 添加 BackgroundTasks 依賴
+    session_id: Annotated[Optional[str], Form()] = None # 可選的 session_id
 ):
     """
     處理文件上傳，將文件內容異步添加到個人知識庫向量資料庫。
     立即返回處理中狀態，實際處理在背景執行。
     """
     logging.info(f"接收到文件上傳請求：文件名 '{file.filename}'，內容類型 '{file.content_type}'")
+    
+    current_session_id = session_id
+    if not current_session_id:
+        # 如果前端沒有提供 session_id，可以選擇生成一個，或者返回錯誤，
+        # 或者對於文件上傳，如果 session_id 不是強制性的，可以允許為 None。
+        # 這裡我們選擇如果沒提供就生成一個，與聊天邏輯類似。
+        current_session_id = str(uuid.uuid4())
+        logging.info(f"文件上傳：未提供 Session ID，已生成新的：{current_session_id} 用於文件 '{file.filename}'")
+    else:
+        logging.info(f"接收到文件上傳請求：文件名 '{file.filename}'，Session ID: {current_session_id}")
 
     # 檢查向量資料庫是否成功初始化
     if vectorstore is None:
@@ -414,7 +428,8 @@ async def upload_document(
         background_tasks.add_task(
             process_document_in_background, # 要執行的背景函式
             temp_file_path,                 # 傳遞給背景函式的參數
-            file.filename                   # 傳遞給背景函式的參數
+            file.filename,                   # 傳遞給背景函式的參數
+            current_session_id
         )
 
         logging.info(f"文件 '{file.filename}' 的背景處理任務已成功安排。")
@@ -440,7 +455,7 @@ async def upload_document(
 # --- 定義語音輸入處理 API 端點 ---
 # 接收音頻檔案上傳
 @app.post("/upload_audio_for_summary", response_model=ChatResponse) # 可以返回摘要文字，使用 ChatResponse
-async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)]): # 接收音頻檔案
+async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)], session_id: Annotated[Optional[str], Form()] = None): # 接收音頻檔案
     """
     接收音頻檔案，進行語音轉文字，AI 摘要，並將摘要保存到個人知識庫。
     """
@@ -449,25 +464,25 @@ async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)])
     # 檢查必要的 API 金鑰是否可用
     if not OPENAI_API_KEY: # 檢查 OpenAI 金鑰 (轉錄需要)
          logging.error("接收到音頻上傳請求，但缺少 OPENAI_API_KEY 環境變數。")
-         return ChatResponse(reply="抱歉，語音轉文字功能未啟用，因為缺少 OpenAI API 金鑰。")
+         return ChatResponse(reply="抱歉，語音轉文字功能未啟用，因為缺少 OpenAI API 金鑰。", session_id= session_id)
 
     if not GOOGLE_API_KEY: # 檢查 Google 金鑰 (摘要和保存需要)
          logging.error("接收到音頻上傳請求，但缺少 GOOGLE_API_KEY 環境變數。")
-         return ChatResponse(reply="抱歉，AI 摘要和保存功能未啟用，因為缺少 Google API 金鑰。")
+         return ChatResponse(reply="抱歉，AI 摘要和保存功能未啟用，因為缺少 Google API 金鑰。", session_id= session_id)
 
     if not openai_client: # 檢查 client 實例是否存在
         logging.error("接收到音頻上傳請求，但 OpenAI client 未初始化。")
-        return ChatResponse(reply="抱歉，語音轉文字功能未啟用，因為 OpenAI 客戶端未初始化。")
+        return ChatResponse(reply="抱歉，語音轉文字功能未啟用，因為 OpenAI 客戶端未初始化。", session_id= session_id)
 
     # 檢查 AI 模型是否成功初始化 (摘要需要)
     if model is None:
         logging.error("接收到音頻上傳請求，但 AI 模型未初始化。")
-        return ChatResponse(reply="抱歉，AI 助理目前無法使用，因為模型未初始化。")
+        return ChatResponse(reply="抱歉，AI 助理目前無法使用，因為模型未初始化。", session_id= session_id)
 
      # 檢查向量資料庫是否成功初始化 (保存摘要需要)
      # 如果向量庫未初始化，可以選擇不保存，但仍然返回摘要
     if vectorstore is None:
-        logging.warning("接收到音頻上傳請求，但向量資料庫未初始化，摘要結果將無法保存。")
+        logging.warning("接收到音頻上傳請求，但向量資料庫未初始化，摘要結果將無法保存。", session_id= session_id)
         # 不返回錯誤，繼續流程，只進行轉錄和摘要但不保存
 
 
@@ -489,12 +504,12 @@ async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)])
 
             # --- 1. 呼叫核心邏輯進行語音轉文字 ---
             # 使用全局的 OPENAI_API_KEY 進行轉錄
-            transcribed_text = await run_in_threadpool(transcribe_audio,temp_audio_path, OPENAI_API_KEY)
+            transcribed_text = await asyncio.to_thread(transcribe_audio,temp_audio_path, openai_client)
 
             if not transcribed_text:
                 logging.error("語音轉文字失敗。")
                 # transcribe_audio 內部會記錄詳細錯誤
-                return ChatResponse(reply="抱歉，語音轉文字失敗，請檢查音頻檔案或後台日誌。")
+                return ChatResponse(reply="抱歉，語音轉文字失敗，請檢查音頻檔案或後台日誌。", session_id= session_id)
 
             logging.info(f"語音轉文字成功。轉錄文本 (前 100 字元): {transcribed_text[:100]}...")
 
@@ -523,7 +538,7 @@ async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)])
                 if not summary_text:
                      logging.warning("AI 模型未能生成摘要文本。")
                      # 返回轉錄文本，並告知未能生成摘要
-                     return ChatResponse(reply=f"已轉錄：\n{transcribed_text}\n\n注意：AI 未能成功生成摘要。")
+                     return ChatResponse(reply=f"已轉錄：\n{transcribed_text}\n\n注意：AI 未能成功生成摘要。", session_id= session_id)
 
                 logging.info(f"AI 摘要成功。摘要文本 (前 100 字元): {summary_text[:100]}...")
 
@@ -547,39 +562,37 @@ async def upload_audio_for_summary(audio_file: Annotated[UploadFile, File(...)])
 
                      success = process_and_add_to_vector_store(
                          temp_summary_file_path,
-                         vectorstore, # 將全局的 vectorstore 對象傳遞進去
-                         DEFAULT_EMBEDDING_MODEL_NAME,
-                         GOOGLE_API_KEY
+                         vectorstore # 將全局的 vectorstore 對象傳遞進去
                      )
 
                      if success:
                          logging.info("摘要成功保存到個人知識庫。")
                          # 返回摘要結果，並告知已保存
-                         return ChatResponse(reply=f"摘要成功並已保存到知識庫：\n{summary_text}")
+                         return ChatResponse(reply=f"摘要成功並已保存到知識庫：\n{summary_text}", session_id= session_id)
                      else:
                          logging.error("將摘要保存到個人知識庫失敗。")
                          # 返回摘要結果，並告知保存失敗
                          # process_and_add_to_vector_store 內部會記錄詳細錯誤
-                         return ChatResponse(reply=f"摘要成功：\n{summary_text}\n\n注意：保存到知識庫失敗，請查看後台日誌。")
+                         return ChatResponse(reply=f"摘要成功：\n{summary_text}\n\n注意：保存到知識庫失敗，請查看後台日誌。", session_id= session_id)
 
 
                 else:
                     logging.warning("向量資料庫未初始化，跳過保存摘要到個人知識庫。")
                     # 返回摘要結果，並告知未保存
-                    return ChatResponse(reply=f"摘要成功：\n{summary_text}\n\n注意：個人知識庫未準備好，未能保存摘要。")
+                    return ChatResponse(reply=f"摘要成功：\n{summary_text}\n\n注意：個人知識庫未準備好，未能保存摘要。", session_id= session_id)
 
 
             except Exception as e:
                  # 捕獲 AI 摘要或保存時的錯誤
                  logging.error(f"執行 AI 摘要或保存時發生意外錯誤: {e}", exc_info=True)
                  # 即使摘要或保存失敗，也嘗試返回轉錄文本
-                 return ChatResponse(reply=f"已轉錄：\n{transcribed_text}\n\n抱歉，生成摘要或保存時發生內部錯誤：{e}")
+                 return ChatResponse(reply=f"已轉錄：\n{transcribed_text}\n\n抱歉，生成摘要或保存時發生內部錯誤：{e}", session_id= session_id)
 
 
     except Exception as e:
         # 捕獲文件上傳或轉錄時的錯誤
         logging.error(f"處理音頻上傳和轉錄時發生意外錯誤: {e}", exc_info=True)
-        return ChatResponse(reply=f"抱歉，處理音頻文件時發生內部錯誤：{e}")
+        return ChatResponse(reply=f"抱歉，處理音頻文件時發生內部錯誤：{e}", session_id= session_id)
 
     # 臨時文件和目錄在 with tempfile.TemporaryDirectory() 區塊結束時會被自動清理
 
