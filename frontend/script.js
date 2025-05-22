@@ -24,8 +24,8 @@ const newsletterContentDiv = document.getElementById('newsletter-content');
 
 // FastAPI 後端 API 的端點 URL
 const IS_DEVELOPMENT = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-// const API_BASE_URL = IS_DEVELOPMENT ? 'http://localhost:8000' : 'https://personal-ai-assistant-471912625165.us-east1.run.app';
-const API_BASE_URL = 'https://personal-ai-assistant-471912625165.us-east1.run.app';
+const API_BASE_URL = IS_DEVELOPMENT ? 'http://localhost:8000' : 'https://personal-ai-assistant-471912625165.us-east1.run.app';
+// const API_BASE_URL = 'https://personal-ai-assistant-471912625165.us-east1.run.app';
 const API_CHAT_URL = `${API_BASE_URL}/chat`; // 聊天端點 URL
 const API_CHAT_STREAM_URL = `${API_BASE_URL}/chat_stream`; // 新的串流端點 (假設後端已改為 GET)
 const API_HISTORY_URL = `${API_BASE_URL}/history`; // 歷史端點 URL
@@ -36,6 +36,16 @@ const API_LATEST_NEWSLETTER_URL = `${API_BASE_URL}/latest_newsletter`; // <--- �
 // 未來可以通過使用者登入等方式獲取真正的 session ID
 // const CURRENT_SESSION_ID = 'test_session_123_1'; // <--- 確保這個與後端保存歷史使用的 ID 一致
 let currentSessionId = localStorage.getItem('ai_assistant_pwa_session_id'); // 從 localStorage 嘗試載入
+let eventSource = null; 
+let currentAiMessageElement = null;
+
+// --- 接著是你所有全局函式的定義 ---
+function updateSessionIdDisplay() {
+    const sessionIdDisplay = document.getElementById('sessionIdDisplay'); // 可以在函式內部獲取，或假設已在全局獲取
+    if (sessionIdDisplay) {
+        sessionIdDisplay.textContent = currentSessionId ? currentSessionId : '新對話';
+    }
+}
 
 // --- 修改 appendMessage 函式以支援串流 ---
 function appendMessage(messageText, sender, isStreaming = false) {
@@ -219,9 +229,9 @@ async function sendMessageSSE() {
         finalizeAiMessageStreaming();
         try {
             const errorData = JSON.parse(event.data);
-            addMessageToChatbox(`AI 處理錯誤: ${errorData.error} ${errorData.detail || ''}`, 'error', false);
+            appendMessage(`AI 處理錯誤: ${errorData.error} ${errorData.detail || ''}`, 'error', false);
         } catch (e) {
-            addMessageToChatbox('AI 處理時發生未知伺服器錯誤。', 'error', false);
+            appendMessage('AI 處理時發生未知伺服器錯誤。', 'error', false);
         }
         if (eventSource) eventSource.close(); // 確保關閉
         sendButton.disabled = false;
@@ -230,7 +240,7 @@ async function sendMessageSSE() {
     eventSource.onerror = (error) => { // 監聽 EventSource 連線本身的錯誤
         console.error("EventSource connection failed:", error);
         finalizeAiMessageStreaming();
-        addMessageToChatbox('與 AI 的連接中斷或發生錯誤。', 'error', false);
+        appendMessage('與 AI 的連接中斷或發生錯誤。', 'error', false);
         if (eventSource) eventSource.close(); // 確保關閉
         sendButton.disabled = false;
     };
@@ -255,7 +265,7 @@ async function uploadDocument() {
         // 這裡我們假設如果前端有，就傳送
          formData.append('session_id', ''); // 或者後端處理 Optional[str] = None
     }
-    
+
     try {
         // 修改這裡使用新的 URL 常量
         const response = await fetch(API_UPLOAD_DOCUMENT_URL, { // <--- 使用 API_UPLOAD_DOCUMENT_URL

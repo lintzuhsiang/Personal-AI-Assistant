@@ -1,7 +1,7 @@
 # 導入 FastAPI 相關模組
 import asyncio
 import uuid
-from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, Form, File, Depends
+from fastapi import FastAPI, BackgroundTasks, HTTPException, UploadFile, Query, Form, File, Depends
 from fastapi.responses import StreamingResponse # <--- 新增 StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware # 導入 CORS 中介層
 from fastapi.concurrency import run_in_threadpool
@@ -195,7 +195,7 @@ async def startup_event():
 # --- 定義 API 端點 ---
 # @app.post("/chat") 定義一個處理 POST 請求的端點，路徑是 /chat
 # response_model=ChatResponse 指定了回應的資料模型
-@app.post("/chat", response_model=ChatResponse)
+@app.get("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     """
     處理聊天請求，接收使用者訊息並返回 AI 的回答。
@@ -256,22 +256,35 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     return ChatResponse(reply=ai_response_text, session_id=current_session_id)
 
 # --- 新增：串流聊天 API 端點 ---
-@app.post("/chat_stream")
-async def chat_stream_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
-    logging.info(f"接收到串流聊天請求：'{request.message}', Session ID: {request.session_id}")
+@app.get("/chat_stream")
+async def chat_stream_endpoint(
+        message: str = Query(
+            ..., # '...' 表示這個查詢參數是必需的
+            min_length=1, 
+            title="User Message",
+            description="使用者輸入的訊息內容。"
+        ),
+        session_id: Optional[str] = Query(
+            None, # 預設值為 None，表示這個查詢參數是可選的
+            title="Session ID",
+            description="目前的會話 ID (可選，如果未提供，後端會生成一個新的)。"
+        ),
+        db: Session = Depends(get_db)
+    ):
+    logging.info(f"接收到串流聊天請求：'{message}', Session ID: {session_id}")
 
     if model is None:
         logging.error("串流請求：AI 模型未初始化。")
         raise HTTPException(status_code=503, detail="AI 服務未初始化 (模型)")
 
-    current_session_id = request.session_id
+    current_session_id = session_id
     if not current_session_id:
         current_session_id = str(uuid.uuid4())
         logging.info(f"串流請求：未提供 Session ID，已生成新的 Session ID：{current_session_id}")
 
     # 1. 保存使用者訊息到資料庫
     try:
-        user_message_db = Message(session_id=current_session_id, sender="user", text=request.message)
+        user_message_db = Message(session_id=current_session_id, sender="user", text= message)
         db.add(user_message_db)
         db.commit()
         db.refresh(user_message_db)
@@ -285,7 +298,7 @@ async def chat_stream_endpoint(request: ChatRequest, db: Session = Depends(get_d
         ai_response_saved = False # 標記 AI 回應是否已嘗試儲存
         try:
             async for chunk in get_ai_response_stream(
-                user_input=request.message,
+                user_input= message,
                 model=model, # 全局 model
                 vectorstore=vectorstore, # 全局 vectorstore
                 search_api_key=SEARCH_API_KEY,
