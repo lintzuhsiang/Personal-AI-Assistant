@@ -87,17 +87,12 @@ class LatestNewsletterResponse(BaseModel):
 app = FastAPI()
 
 # --- 添加 CORS 中介層 (Industry Standard) ---
-# 允許所有來源 (為了本地開發和測試方便)
-# 在生產環境中，您應該將 "*" 替換為您前端應用的具體來源 URL
-# 如果您是直接打開本地 HTML 文件 (file://)，某些瀏覽器可能會有 CORS 問題，
-# 允許 "*" 是最寬鬆的，適合本地開發調試。
-# 更嚴謹的做法是通過一個簡單的本地 HTTP 服務器來運行前端。
+# 通過一個簡單的本地 HTTP 服務器來運行前端。
 origins = [
-    "*" # 允許所有來源進行跨來源請求
-    # 如果您知道前端的精確來源，可以這樣設定 (例如):
-    # "http://localhost",
-    # "http://localhost:8080",
-    # "http://127.0.0.1:8000", # 允許來自後端本身的請求 (如果前端和後端在同一個服務器)
+    "http://localhost",
+    "http://localhost:8081",
+    "http://127.0.0.1:8001", # 允許來自後端本身的請求 (如果前端和後端在同一個服務器)
+    "https://lintzuhsiang.github.io" # current home page deployed on github url. 
 ]
 
 app.add_middleware(
